@@ -217,7 +217,8 @@ export default function Editor({ initial }: { initial: Initial }) {
   const aiVersion = s.versions.find((v) => v.kind === "ai");
 
   return (
-    <div className="flex h-dvh min-h-[640px] flex-col">
+    // <div className="flex h-dvh min-h-[640px] flex-col">
+    <div className="flex min-h-dvh lg:min-h-[640px] lg:h-dvh flex-col">
       {/* barre d'outils */}
       <header className="flex flex-wrap items-center gap-2 border-b border-line bg-panel px-3 py-2">
         <Link href="/dashboard" className="font-display text-3xl leading-none text-ink" aria-label="Retour aux projets">MotionIA</Link>
