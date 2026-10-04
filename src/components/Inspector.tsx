@@ -1,0 +1,241 @@
+//src/components/Inspector.tsx
+/**
+ * Inspector.tsx — propriétés du clip sélectionné, GÉNÉRÉES depuis les zod des effets (curseurs bornés) ; onglet JSON.
+ * Contient : <Inspector/>, NumField (valeur ou keyframes), ParamFields (formulaire d'un effet), éditeur de mots, éditeur JSON validé.
+ * Ne contient PAS : liste d'effets écrite en dur (tout vient du registre), état local qui duplique le document.
+ */
+"use client";
+import { useMemo, useState } from "react";
+import { evalNum, isKf, layoutDoc, wordsOf } from "@/lib/engine";
+import { CompositionS, paramSpecs, type Composition, type EffectDef, type EffectKind, type Num, type VideoClip } from "@/lib/schema";
+import { activeEffects, registry } from "@/effects";
+import { useEditor } from "@/lib/store";
+
+const upsertKf = (n: Num | undefined, t: number, v: number): Num => {
+  const kf = isKf(n) ? n.kf.map((k) => [...k] as [number, number, string?]) : [];
+  const i = kf.findIndex((k) => Math.abs(k[0] - t) < 25);
+  if (i >= 0) kf[i][1] = v; else { kf.push([Math.round(t), v]); kf.sort((a, b) => a[0] - b[0]); }
+  return { kf } as Num;
+};
+
+function NumField({ label, value, def, min, max, step = 0.01, local, onChange }: { label: string; value: Num | undefined; def: number; min: number; max: number; step?: number; local: number; onChange: (n: Num) => void }) {
+  const end = useEditor.getState().endGesture;
+  const animated = isKf(value), cur = evalNum(value, local, def);
+  return (
+    <label className="flex items-center gap-2 text-xs">
+      <span className="w-20 shrink-0 text-muted">{label}</span>
+      <input type="range" min={min} max={max} step={step} value={cur} className="min-w-0 flex-1"
+        onChange={(e) => onChange(animated ? upsertKf(value, local, +e.target.value) : +e.target.value)} onPointerUp={end} onKeyUp={end} />
+      <input type="number" min={min} max={max} step={step} value={Number(cur.toFixed(3))} className="field !w-16 !px-1 !py-0.5 text-right font-mono"
+        onChange={(e) => { const v = Math.min(max, Math.max(min, +e.target.value)); onChange(animated ? upsertKf(value, local, v) : v); }} onBlur={end} />
+      <button type="button" title={animated ? "Retirer l'animation" : "Animer ce paramètre (image clé à la position du playhead)"} aria-label="Animer"
+        className={`rounded px-1 ${animated ? "text-accent-2" : "text-muted"}`} onClick={() => { onChange(animated ? cur : { kf: [[Math.round(local), cur]] }); end(); }}>◆</button>
+    </label>
+  );
+}
+
+function ParamFields({ def, values, local, onSet }: { def: EffectDef; values: Record<string, any> | undefined; local: number; onSet: (k: string, v: any) => void }) {
+  const end = useEditor.getState().endGesture;
+  const specs = paramSpecs(def);
+  if (!specs.length) return <p className="text-xs text-muted">Aucun réglage.</p>;
+  return (
+    <div className="space-y-1.5">
+      {specs.map((s) => {
+        const v = values?.[s.key];
+        if (s.type === "number") return <NumField key={s.key} label={s.key} value={v} def={s.def} min={s.min} max={s.max} step={(s.max - s.min) > 20 ? 1 : 0.01} local={local} onChange={(n) => onSet(s.key, n)} />;
+        if (s.type === "color") return <label key={s.key} className="flex items-center gap-2 text-xs"><span className="w-20 text-muted">{s.key}</span><input type="color" value={typeof v === "string" ? v : s.def} onChange={(e) => onSet(s.key, e.target.value)} onBlur={end} /></label>;
+        if (s.type === "boolean") return <label key={s.key} className="flex items-center gap-2 text-xs"><span className="w-20 text-muted">{s.key}</span><input type="checkbox" checked={typeof v === "boolean" ? v : !!s.def} onChange={(e) => { onSet(s.key, e.target.checked); end(); }} /></label>;
+        if (s.type === "enum") return <label key={s.key} className="flex items-center gap-2 text-xs"><span className="w-20 text-muted">{s.key}</span><select className="field !py-0.5" value={v ?? s.def} onChange={(e) => { onSet(s.key, e.target.value); end(); }}>{s.options!.map((o) => <option key={o}>{o}</option>)}</select></label>;
+        return <label key={s.key} className="flex items-center gap-2 text-xs"><span className="w-20 text-muted">{s.key}</span><input className="field !py-0.5" value={v ?? s.def} onChange={(e) => onSet(s.key, e.target.value)} onBlur={end} /></label>;
+      })}
+    </div>
+  );
+}
+
+const Section = ({ title, children }: { title: string; children: React.ReactNode }) => (
+  <section className="border-b border-line px-3 py-3"><h3 className="mb-2 text-xs font-semibold text-ink/80">{title}</h3>{children}</section>
+);
+
+function EffectPicker({ kind, disabled, onPick, placeholder }: { kind: EffectKind; disabled: string[]; onPick: (id: string) => void; placeholder: string }) {
+  return (
+    <select className="field !py-1 text-xs" value="" onChange={(e) => { if (e.target.value) onPick(e.target.value); }}>
+      <option value="">{placeholder}</option>
+      {activeEffects(disabled, kind).map((e) => <option key={e.id} value={e.id} title={e.describe}>{e.id}</option>)}
+    </select>
+  );
+}
+
+export default function Inspector() {
+  const doc = useEditor((s) => s.doc), sel = useEditor((s) => s.selection), t = useEditor((s) => s.t), disabled = useEditor((s) => s.disabled);
+  const [tab, setTab] = useState<"props" | "json">("props");
+  const act = useEditor.getState();
+  const layout = useMemo(() => layoutDoc(doc), [doc]);
+  const p = sel ? layout.byId[sel] : undefined;
+  const clip: any = p?.clip, track = p ? doc.tracks[p.trackIdx] : undefined;
+  const local = p ? Math.max(0, t - p.at) : 0;
+  const mut = (fn: (c: any, tr: any) => void, label = "Modifier") => act.apply(label, (d) => { for (const tr of d.tracks) { const c = (tr.clips as any[]).find((x) => x.id === sel); if (c) fn(c, tr); } }, true);
+  const setParam = (list: "fx" | "mesh" | "params", idx: number, k: string, v: any) => mut((c) => { const o = list === "fx" ? c.fx[idx] : list === "mesh" ? c.mesh : c; o.params = { ...(o.params ?? {}), [k]: v }; });
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="flex border-b border-line text-sm">
+        {(["props", "json"] as const).map((k) => <button key={k} onClick={() => setTab(k)} className={`flex-1 py-2 ${tab === k ? "border-b-2 border-accent text-ink" : "text-muted"}`}>{k === "props" ? "Propriétés" : "JSON"}</button>)}
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        {tab === "json" ? <JsonTab doc={doc} /> : !p ? <ProjectProps disabled={disabled} /> : (
+          <>
+            <Section title={`${track!.kind} — ${p.id}`}>
+              <div className="flex flex-wrap gap-2 text-xs">
+                {clip.anchor ? <button className="btn !py-1" onClick={() => mut((c) => { c.at = p.at; c.dur = p.dur; delete c.anchor; }, "Détacher")}>Détacher des mots (figer le temps)</button>
+                  : !p.magnetic && track!.kind !== "caption" && !(track!.kind === "adjustment" && clip.span) ? (
+                    <>
+                      <label className="flex items-center gap-1">début<input type="number" className="field !w-20 !py-0.5 font-mono" value={Math.round(p.at)} min={0} step={10} onChange={(e) => mut((c) => { c.at = Math.max(0, +e.target.value); })} /></label>
+                      <label className="flex items-center gap-1">durée<input type="number" className="field !w-20 !py-0.5 font-mono" value={Math.round(p.dur)} min={50} step={10} onChange={(e) => mut((c) => { c.dur = Math.max(50, +e.target.value); })} /></label>
+                    </>
+                  ) : <span className="text-muted">Timing géré automatiquement ({p.magnetic ? "piste magnétique" : "suit un autre clip"}).</span>}
+              </div>
+              {clip.anchor && <p className="mt-1 text-xs text-muted">Ancré aux mots {clip.anchor.words[0]}–{clip.anchor.words[1]} de {clip.anchor.clip}.</p>}
+            </Section>
+
+            {track!.kind === "video" && (
+              <Section title="Vidéo">
+                <NumField label="vitesse" value={clip.speed} def={1} min={0.1} max={4} local={local} onChange={(n) => mut((c) => { c.speed = n; })} />
+                <NumField label="volume" value={clip.volume} def={1} min={0} max={1} local={local} onChange={(n) => mut((c) => { c.volume = n; })} />
+                <label className="mt-1.5 flex items-center gap-2 text-xs"><span className="w-20 text-muted">cadrage</span>
+                  <select className="field !py-0.5" value={clip.fit ?? "cover"} onChange={(e) => mut((c) => { c.fit = e.target.value; })}><option value="cover">remplir</option><option value="contain">contenir</option><option value="fill">étirer</option></select></label>
+              </Section>
+            )}
+            {track!.kind === "text" && (
+              <Section title="Texte">
+                <input className="field mb-2" value={clip.text ?? ""} maxLength={500} placeholder="Votre texte" onChange={(e) => mut((c) => { c.text = e.target.value; })} onBlur={act.endGesture} />
+                <StylePicker kind="text_style" value={clip.style} disabled={disabled} onPick={(id) => mut((c) => { c.style = id; })} params={clip.params} local={local} onSet={(k, v) => setParam("params", 0, k, v)} />
+                <label className="mt-2 flex items-center gap-2 text-xs"><span className="w-20 text-muted">révélation</span>
+                  <select className="field !py-0.5" value={clip.reveal?.by ?? ""} onChange={(e) => mut((c) => { c.reveal = e.target.value ? { by: e.target.value, effect: "rise", stagger: c.reveal?.stagger ?? 40 } : undefined; })}><option value="">aucune</option><option value="letters">lettres</option><option value="words">mots</option></select></label>
+              </Section>
+            )}
+            {track!.kind === "caption" && (
+              <Section title="Sous-titres">
+                <StylePicker kind="caption_style" value={clip.style} disabled={disabled} onPick={(id) => mut((c) => { c.style = id; })} params={clip.params} local={local} onSet={(k, v) => setParam("params", 0, k, v)} />
+                <WordsEditor from={clip.from} doc={doc} />
+              </Section>
+            )}
+            {track!.kind === "overlay" && (
+              <Section title="Overlay">
+                <EffectPicker kind="overlay" disabled={disabled} placeholder={clip.effect} onPick={(id) => mut((c) => { c.effect = id; c.params = {}; })} />
+                {registry.get(clip.effect) && <div className="mt-2"><ParamFields def={registry.get(clip.effect)!} values={clip.params} local={local} onSet={(k, v) => setParam("params", 0, k, v)} /></div>}
+              </Section>
+            )}
+
+            {track!.kind !== "audio" && track!.kind !== "adjustment" && track!.kind !== "caption" && (
+              <Section title="Position et forme">
+                <div className="space-y-1.5">
+                  <NumField label="x" value={clip.transform?.pos?.x} def={0.5} min={-0.5} max={1.5} local={local} onChange={(n) => mut((c) => { c.transform = { ...(c.transform ?? {}), pos: { x: n, y: c.transform?.pos?.y ?? 0.5 } }; })} />
+                  <NumField label="y" value={clip.transform?.pos?.y} def={0.5} min={-0.5} max={1.5} local={local} onChange={(n) => mut((c) => { c.transform = { ...(c.transform ?? {}), pos: { x: c.transform?.pos?.x ?? 0.5, y: n } }; })} />
+                  <NumField label="échelle" value={typeof clip.transform?.scale === "object" && clip.transform?.scale && "x" in clip.transform.scale ? undefined : clip.transform?.scale} def={1} min={0.05} max={4} local={local} onChange={(n) => mut((c) => { c.transform = { ...(c.transform ?? {}), scale: n }; })} />
+                  <NumField label="rotation" value={clip.transform?.rot} def={0} min={-180} max={180} step={1} local={local} onChange={(n) => mut((c) => { c.transform = { ...(c.transform ?? {}), rot: n }; })} />
+                  <NumField label="opacité" value={clip.transform?.opacity} def={1} min={0} max={1} local={local} onChange={(n) => mut((c) => { c.transform = { ...(c.transform ?? {}), opacity: n }; })} />
+                </div>
+                <label className="mt-2 flex items-center gap-2 text-xs"><span className="w-20 text-muted">fusion</span>
+                  <select className="field !py-0.5" value={clip.blend ?? "normal"} onChange={(e) => mut((c) => { c.blend = e.target.value; })}>{["normal", "add", "screen", "multiply", "overlay"].map((b) => <option key={b}>{b}</option>)}</select></label>
+                <label className="mt-1.5 flex items-center gap-2 text-xs"><span className="w-20 text-muted">animation</span>
+                  <select className="field !py-0.5" value={clip.motion?.preset ?? ""} onChange={(e) => mut((c) => { c.motion = e.target.value ? { preset: e.target.value } : undefined; })}><option value="">aucune</option>{activeEffects(disabled, "motion_preset").map((e) => <option key={e.id} value={e.id}>{e.id}</option>)}</select></label>
+              </Section>
+            )}
+
+            {(track!.kind === "video" || track!.kind === "adjustment" || track!.kind === "text" || track!.kind === "overlay" || track!.kind === "shape") && (
+              <Section title="Effets d'image">
+                {(clip.fx ?? []).map((f: any, i: number) => (
+                  <div key={i} className="mb-3 rounded-lg border border-line p-2">
+                    <div className="mb-1.5 flex items-center justify-between text-xs font-medium">{f.id}<button className="text-muted hover:text-bad" onClick={() => mut((c) => { c.fx.splice(i, 1); }, "Retirer l'effet")}>Retirer</button></div>
+                    {registry.get(f.id) ? <ParamFields def={registry.get(f.id)!} values={f.params} local={local} onSet={(k, v) => setParam("fx", i, k, v)} /> : <p className="text-xs text-warn">Effet inconnu ou désactivé : ignoré au rendu.</p>}
+                  </div>
+                ))}
+                <EffectPicker kind="fx" disabled={disabled} placeholder="+ Ajouter un effet" onPick={(id) => mut((c) => { c.fx = [...(c.fx ?? []), { id }]; }, "Ajouter un effet")} />
+              </Section>
+            )}
+            {(track!.kind === "video" || track!.kind === "text" || track!.kind === "overlay") && (
+              <Section title="Déformation (mesh)">
+                {clip.mesh ? (
+                  <>
+                    <div className="mb-1.5 flex items-center justify-between text-xs font-medium">{clip.mesh.id}<button className="text-muted hover:text-bad" onClick={() => mut((c) => { delete c.mesh; }, "Retirer la déformation")}>Retirer</button></div>
+                    {registry.get(clip.mesh.id) ? <ParamFields def={registry.get(clip.mesh.id)!} values={clip.mesh.params} local={local} onSet={(k, v) => setParam("mesh", 0, k, v)} /> : <p className="text-xs text-warn">Déformation inconnue ou désactivée.</p>}
+                  </>
+                ) : <EffectPicker kind="mesh" disabled={disabled} placeholder="+ Ajouter une déformation" onPick={(id) => mut((c) => { c.mesh = { id }; }, "Ajouter une déformation")} />}
+              </Section>
+            )}
+            <div className="p-3"><button className="btn w-full text-bad" onClick={act.deleteSelected}>Supprimer ce clip</button></div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function StylePicker({ kind, value, disabled, onPick, params, local, onSet }: { kind: EffectKind; value: string; disabled: string[]; onPick: (id: string) => void; params?: any; local: number; onSet: (k: string, v: any) => void }) {
+  const def = registry.get(value);
+  return (
+    <div className="space-y-2">
+      <select className="field !py-1 text-xs" value={value} onChange={(e) => onPick(e.target.value)}>
+        {!registry.has(value) && <option value={value}>{value} (inconnu)</option>}
+        {activeEffects(disabled, kind).map((e) => <option key={e.id} value={e.id}>{e.id}</option>)}
+      </select>
+      {def && <ParamFields def={def} values={params} local={local} onSet={onSet} />}
+    </div>
+  );
+}
+
+/** Mots d'un sous-titre : seul le TEXTE est éditable (ordre, nombre et temps sont immuables). */
+function WordsEditor({ from, doc }: { from: string; doc: Composition }) {
+  const L = useMemo(() => layoutDoc(doc), [doc]); const v = L.byId[from]?.clip as VideoClip | undefined;
+  const act = useEditor.getState(); if (!v) return <p className="mt-2 text-xs text-warn">Clip source introuvable.</p>;
+  const all = wordsOf(doc, v.asset).map((w, i) => ({ w, i })).filter(({ w }) => w.s >= v.src[0] - 1 && w.e <= v.src[1] + 1);
+  if (!all.length) return <p className="mt-2 text-xs text-muted">Pas de transcription : lancez l'analyse IA pour obtenir les mots.</p>;
+  return (
+    <div className="mt-3 max-h-48 overflow-y-auto rounded-lg border border-line p-2">
+      <div className="flex flex-wrap gap-1">
+        {all.map(({ w, i }) => (
+          <input key={i} value={w.t} size={Math.max(2, w.t.length)} className="field !w-auto !px-1.5 !py-0.5 text-xs" aria-label={`Mot ${i}`}
+            onChange={(e) => act.apply("Corriger un mot", (d) => { const a: any = d.assets[v.asset]; if (a?.words?.[i]) a.words[i].t = e.target.value; }, true)} onBlur={act.endGesture} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ProjectProps({ disabled }: { disabled: string[] }) {
+  const doc = useEditor((s) => s.doc); const act = useEditor.getState();
+  return (
+    <>
+      <Section title="Look global (étalonnage)">
+        <select className="field !py-1 text-xs" value={doc.grade?.lut ?? ""} onChange={(e) => act.apply("Look global", (d) => { d.grade = e.target.value ? { lut: e.target.value, amount: d.grade?.amount ?? 0.7 } : undefined; })}>
+          <option value="">Aucun</option>{activeEffects(disabled, "lut").map((e) => <option key={e.id} value={e.id}>{e.id}</option>)}
+        </select>
+        {doc.grade && <div className="mt-2"><NumField label="intensité" value={doc.grade.amount} def={0.7} min={0} max={1} local={0} onChange={(n) => act.apply("Intensité du look", (d) => { if (d.grade) d.grade.amount = n; }, true)} /></div>}
+      </Section>
+      <Section title="Format">
+        <select className="field !py-1 text-xs" value={`${doc.canvas.w}x${doc.canvas.h}`} onChange={(e) => { const [w, h] = e.target.value.split("x").map(Number); act.apply("Format", (d) => { d.canvas.w = w; d.canvas.h = h; }); }}>
+          <option value="1080x1920">Vertical 9:16 (TikTok, Reels, Shorts)</option><option value="1080x1350">Portrait 4:5</option><option value="1080x1080">Carré 1:1</option><option value="1920x1080">Paysage 16:9</option>
+        </select>
+        <label className="mt-2 flex items-center gap-2 text-xs"><span className="w-20 text-muted">images/s</span>
+          <select className="field !py-0.5" value={doc.canvas.fps} onChange={(e) => act.apply("Cadence", (d) => { d.canvas.fps = +e.target.value; })}>{[24, 25, 30, 60].map((f) => <option key={f}>{f}</option>)}</select></label>
+      </Section>
+      <p className="p-3 text-xs text-muted">Sélectionnez un clip dans la timeline pour régler ses propriétés.</p>
+    </>
+  );
+}
+
+function JsonTab({ doc }: { doc: Composition }) {
+  const [text, setText] = useState<string | null>(null);
+  const shown = text ?? JSON.stringify(doc, null, 2);
+  const res = useMemo(() => { try { const r = CompositionS.safeParse(JSON.parse(shown)); return r.success ? { ok: true as const, data: r.data } : { ok: false as const, msg: r.error.issues.slice(0, 4).map((i) => `${i.path.join(".") || "(racine)"} : ${i.message}`).join("\n") }; } catch (e) { return { ok: false as const, msg: "JSON invalide : " + (e as Error).message }; } }, [shown]);
+  return (
+    <div className="flex h-full flex-col gap-2 p-3">
+      <textarea spellCheck={false} className="field min-h-0 flex-1 resize-none font-mono !text-[11px] leading-relaxed" value={shown} onChange={(e) => setText(e.target.value)} />
+      <p className={`whitespace-pre-wrap text-xs ${res.ok ? "text-ok" : "text-bad"}`}>{res.ok ? "Document valide." : res.msg}</p>
+      <div className="flex gap-2">
+        <button className="btn btn-primary flex-1" disabled={!res.ok || text === null} onClick={() => { if (res.ok) { useEditor.getState().replaceDoc(res.data, "Édition JSON"); setText(null); } }}>Appliquer</button>
+        <button className="btn" disabled={text === null} onClick={() => setText(null)}>Annuler</button>
+      </div>
+    </div>
+  );
+}
