@@ -31,14 +31,17 @@ export class PreviewSource implements FrameSource {
   private sfx = new Map<string, HTMLAudioElement>();
   private urls = new Map<string, string>();
   private loading = new Set<string>();
+  private imgs = new Map<string, { tex: THREE.Texture; w: number; h: number }>();   // assetId → texture d'image fixe
+  private imgLoading = new Set<string>();
+  private clipAsset = new Map<string, string>();                                      // clipId → assetId (pour texture())
   private failed = new Map<string, number>();   // assetId → date de l'échec : on ne réessaie qu'après 2,5 s
-  constructor(private projectId: string, private getDoc: () => Composition, private onMissing?: (assetId: string) => void) {}
+  constructor(private projectId: string, private getDoc: () => Composition, private onMissing?: (assetId: string) => void, private onProblem?: (assetId: string, msg: string) => void) {}
 
   private async urlFor(assetId: string): Promise<string | null> {
     const hit = this.urls.get(assetId); if (hit) return hit;
     if (this.loading.has(assetId)) return null;
     const f = this.failed.get(assetId); if (f && Date.now() - f < 2500) return null;
-    const a = this.getDoc().assets[assetId]; if (!a || a.type !== "video") return null;
+    const a = this.getDoc().assets[assetId]; if (!a || (a.type !== "video" && a.type !== "audio" && a.type !== "image")) return null;
     this.loading.add(assetId);
     const blob = await getFile(this.projectId, assetId, a as any);
     this.loading.delete(assetId);
@@ -50,9 +53,20 @@ export class PreviewSource implements FrameSource {
     if (!e) {
       const url = this.urls.get(assetId); if (!url) { void this.urlFor(assetId); return null; }
       const el = document.createElement("video"); el.src = url; el.playsInline = true; el.preload = "auto"; el.crossOrigin = "anonymous";
+      el.addEventListener("error", () => this.onProblem?.(assetId, "Le navigateur ne peut pas lire cette vidéo (codec non pris en charge, souvent HEVC/H.265). Convertissez-la en H.264 (MP4)."));
       e = { el, tex: null, url }; this.els.set(clipId, e);
     }
     return e;
+  }
+  /** Image fixe : chargée une fois, texture partagée par tous les clips qui l'utilisent. */
+  private ensureImage(assetId: string) {
+    if (this.imgs.has(assetId) || this.imgLoading.has(assetId)) return;
+    const url = this.urls.get(assetId); if (!url) { void this.urlFor(assetId); return; }
+    this.imgLoading.add(assetId);
+    const img = new Image();
+    img.onload = () => { const tex = new THREE.Texture(img); tex.needsUpdate = true; tex.minFilter = THREE.LinearFilter; tex.generateMipmaps = false; this.imgs.set(assetId, { tex, w: img.naturalWidth, h: img.naturalHeight }); this.imgLoading.delete(assetId); };
+    img.onerror = () => { this.imgLoading.delete(assetId); this.failed.set(assetId, Date.now()); this.onProblem?.(assetId, "Image illisible par ce navigateur (formats : PNG, JPEG, WebP, GIF, AVIF)."); };
+    img.src = url;
   }
   prepare(state: FrameState) { void state; }
   /** Appelé à chaque image par le Preview : aligne lecture/pause/position/volume sur l'horloge. */
@@ -60,7 +74,8 @@ export class PreviewSource implements FrameSource {
     const live = new Set<string>();
     for (const l of state.layers) {
       if (l.p.kind !== "video") continue;
-      const c = l.p.clip as VideoClip; live.add(l.p.id);
+      const c = l.p.clip as VideoClip; live.add(l.p.id); this.clipAsset.set(l.p.id, c.asset);
+      if (doc.assets[c.asset]?.type === "image") { this.ensureImage(c.asset); continue; }
       const e = this.el(l.p.id, c.asset); if (!e) continue;
       const want = (l.srcMs ?? 0) / 1000, track = doc.tracks[l.p.trackIdx];
       e.el.muted = !!track?.muted || !(doc.assets[c.asset] as any)?.hasAudio;
@@ -78,14 +93,15 @@ export class PreviewSource implements FrameSource {
       if (!a && active) {
         let url = this.urls.get(c.asset);
         if (c.asset.startsWith("sfx:")) url = getEffect(c.asset.slice(4))?.url;
-        if (url) { a = new Audio(url); this.sfx.set(p.id, a); }
+        if (url) { a = new Audio(url); this.sfx.set(p.id, a); } else if (!c.asset.startsWith("sfx:")) void this.urlFor(c.asset);
       }
       if (!a) continue;
-      a.volume = Math.min(1, Math.max(0, evalNum(c.gain, state.t - p.at, 1)));
-      if (active && playing) { if (a.paused) { a.currentTime = (state.t - p.at) / 1000; void a.play().catch(() => {}); } } else if (!a.paused) a.pause();
+      a.volume = Math.min(1, Math.max(0, evalNum(c.gain, state.t - p.at, 1))); a.muted = !!doc.tracks[p.trackIdx]?.muted;
+      if (active && playing) { if (a.paused) { a.currentTime = (state.t - p.at + (c.src?.[0] ?? 0)) / 1000; void a.play().catch(() => {}); } } else if (!a.paused) a.pause();
     }
   }
   texture(clipId: string) {
+    const aid = this.clipAsset.get(clipId), im = aid ? this.imgs.get(aid) : undefined; if (im) return im;
     const e = this.els.get(clipId);
     if (!e || e.el.readyState < 2 || !e.el.videoWidth) return null;
     if (!e.tex) e.tex = new THREE.VideoTexture(e.el);
@@ -93,7 +109,7 @@ export class PreviewSource implements FrameSource {
     return { tex: e.tex, w: e.el.videoWidth, h: e.el.videoHeight };
   }
   pauseAll() { for (const e of this.els.values()) e.el.pause(); for (const a of this.sfx.values()) a.pause(); }
-  dispose() { this.pauseAll(); for (const e of this.els.values()) { e.tex?.dispose(); e.el.removeAttribute("src"); e.el.load(); } this.els.clear(); for (const u of this.urls.values()) URL.revokeObjectURL(u); this.urls.clear(); }
+  dispose() { this.pauseAll(); for (const e of this.els.values()) { e.tex?.dispose(); e.el.removeAttribute("src"); e.el.load(); } this.els.clear(); for (const i of this.imgs.values()) i.tex.dispose(); this.imgs.clear(); for (const u of this.urls.values()) URL.revokeObjectURL(u); this.urls.clear(); }
 }
 
 /** Export : décodage exact à l'image (WebCodecs via mediabunny). */
@@ -111,10 +127,20 @@ export class ExportSource implements FrameSource {
     s = { input, sink: new CanvasSink(track) }; this.sinks.set(assetId, s); return s;
   }
   doc!: Composition;
+  /** Image fixe : décodée une fois dans un canvas (l'orientation EXIF est appliquée par le navigateur). */
+  private async loadImage(clipId: string, assetId: string) {
+    if (this.texs.has(clipId)) return;
+    const a: any = this.doc.assets[assetId], blob = await getFile(this.projectId, assetId, a);
+    if (!blob) throw new Error(`Image manquante : « ${a?.name ?? assetId} ». Redonnez le fichier depuis l'éditeur.`);
+    const bmp = await createImageBitmap(blob), cv = document.createElement("canvas"); cv.width = bmp.width; cv.height = bmp.height;
+    cv.getContext("2d")!.drawImage(bmp, 0, 0); bmp.close();
+    this.texs.set(clipId, { tex: new THREE.CanvasTexture(cv), w: cv.width, h: cv.height });
+  }
   async prepare(state: FrameState) {
     for (const l of state.layers) {
       if (l.p.kind !== "video") continue;
       const c = l.p.clip as VideoClip;
+      if (this.doc.assets[c.asset]?.type === "image") { await this.loadImage(l.p.id, c.asset); continue; }
       const { sink } = await this.sinkFor(c.asset, this.doc);
       const f = await sink.getCanvas((l.srcMs ?? 0) / 1000); if (!f) continue;
       const cv = f.canvas as HTMLCanvasElement;
@@ -141,6 +167,14 @@ function paramUniforms(def: EffectDef, vals: Record<string, any>): Record<string
     if (s.type === "number") u[s.key] = { value: v }; else if (s.type === "boolean") u[s.key] = { value: v ? 1 : 0 }; else if (s.type === "color") u[s.key] = { value: hex3(v) };
   }
   return u;
+}
+/**
+ * Copie des valeurs dans les uniforms EXISTANTS d'un matériau. three.js capture `material.uniforms` au premier rendu :
+ * réassigner l'objet ensuite n'a aucun effet (valeurs figées sur la 1re image). Ne jamais écrire `mat.uniforms = …`.
+ * Chaque matériau doit recevoir le même jeu de clés à chaque appel (la liste d'uniforms est mise en cache au 1er rendu).
+ */
+function setUniforms(mat: THREE.ShaderMaterial, uni: Record<string, THREE.IUniform>) {
+  for (const k in uni) { const cur = mat.uniforms[k]; if (cur) cur.value = uni[k].value; else mat.uniforms[k] = uni[k]; }
 }
 /** Valeurs d'un effet à l'instant `local` : keyframes évaluées, puis ramenées dans les bornes. */
 function resolveParams(def: EffectDef, raw: Record<string, any> | undefined, local: Ms) {
@@ -195,7 +229,7 @@ export class Compositor {
     this.mats.set(key, m); return m;
   }
   private fullscreen(mat: THREE.ShaderMaterial, uniforms: Record<string, THREE.IUniform>, target: THREE.WebGLRenderTarget | null, opaque = false) {
-    mat.uniforms = uniforms; mat.blending = opaque ? THREE.NoBlending : THREE.CustomBlending; mat.needsUpdate = false;
+    setUniforms(mat, uniforms); mat.blending = opaque ? THREE.NoBlending : THREE.CustomBlending; mat.needsUpdate = false;
     this.fsMesh.material = mat; this.renderer.setRenderTarget(target); this.renderer.render(this.fsScene, this.fsCam);
   }
   /** Pile fx : texture → texture, en ping-pong. Retourne la texture finale et les RT à libérer. */
@@ -264,9 +298,9 @@ void main(){ vec4 c = texture2D(tMap, vUv); float a = c.a * uOpacity; gl_FragCol
     else if (l.p.kind === "overlay") {
       const def = getEffect(c.effect, this.disabled); if (!def?.shader) return;
       const mat = this.fxMat(def, "overlay"); const m = this.setBlend(mat, c.blend);
-      void m; this.clear(null, 0);
+      void m;
       const vals = resolveParams(def, c.params, l.local);
-      mat.uniforms = { tMap: { value: null }, uTime: { value: t / 1000 }, uRes: { value: new THREE.Vector2(w, h) }, uSeed: { value: 0 }, uAmount: { value: 1 }, ...paramUniforms(def, vals) };
+      setUniforms(mat, { tMap: { value: null }, uTime: { value: t / 1000 }, uRes: { value: new THREE.Vector2(w, h) }, uSeed: { value: 0 }, uAmount: { value: 1 }, ...paramUniforms(def, vals) });
       mat.blending = THREE.CustomBlending; this.fsMesh.material = mat; this.renderer.setRenderTarget(target); this.renderer.render(this.fsScene, this.fsCam); return;
     }
     if (!tex) return;
@@ -278,7 +312,7 @@ void main(){ vec4 c = texture2D(tMap, vUv); float a = c.a * uOpacity; gl_FragCol
       // prépasse : image « fittée » à la taille du canvas, puis pile fx
       const fit = this.acquire(); used.push(fit); this.clear(fit);
       const mat = this.presMat(undefined, false), uni = { tMap: { value: tex }, uOpacity: { value: 1 }, uPremult: { value: 0 }, uTime: { value: 0 }, uSize: { value: new THREE.Vector2(1, 1) }, uC: { value: [new THREE.Vector2(), new THREE.Vector2(), new THREE.Vector2(), new THREE.Vector2()] }, uRes: { value: new THREE.Vector2(w, h) }, uCorners: { value: 0 } };
-      this.setBlend(mat, "normal"); this.quad.geometry = this.geo([1, 1]); this.quad.material = mat; mat.uniforms = uni;
+      this.setBlend(mat, "normal"); this.quad.geometry = this.geo([1, 1]); this.quad.material = mat; setUniforms(mat, uni);
       this.quad.position.set(0, 0, 0); this.quad.scale.set(bw, bh, 1); this.quad.rotation.set(0, 0, 0);
       this.renderer.setRenderTarget(fit); this.renderer.render(this.scene, this.ortho);
       const r = this.runFx(fit.texture, c.fx, l.local, t, seed); used.push(...r.used); tex = r.tex; bw = w; bh = h;
@@ -291,7 +325,7 @@ void main(){ vec4 c = texture2D(tMap, vUv); float a = c.a * uOpacity; gl_FragCol
     const premult = this.setBlend(mat, c.blend);
     const meshVals = useMesh ? resolveParams(meshDef!, c.mesh.params, l.local) : {};
     const C = (tr.corners ?? [[0, 0], [1, 0], [1, 1], [0, 1]]).map((p) => new THREE.Vector2(p[0], p[1]));
-    mat.uniforms = { tMap: { value: tex }, uOpacity: { value: Math.max(0, Math.min(1, tr.opacity * extraOpacity)) }, uPremult: { value: premult }, uTime: { value: t / 1000 }, uSize: { value: new THREE.Vector2(bw * tr.sx, bh * tr.sy) }, uC: { value: C }, uRes: { value: new THREE.Vector2(w, h) }, uCorners: { value: tr.corners ? 1 : 0 }, ...(useMesh ? paramUniforms(meshDef!, meshVals) : {}) };
+    setUniforms(mat, { tMap: { value: tex }, uOpacity: { value: Math.max(0, Math.min(1, tr.opacity * extraOpacity)) }, uPremult: { value: premult }, uTime: { value: t / 1000 }, uSize: { value: new THREE.Vector2(bw * tr.sx, bh * tr.sy) }, uC: { value: C }, uRes: { value: new THREE.Vector2(w, h) }, uCorners: { value: tr.corners ? 1 : 0 }, ...(useMesh ? paramUniforms(meshDef!, meshVals) : {}) });
     this.quad.geometry = this.geo(tr.corners ? [24, 24] : useMesh ? meshDef!.mesh!.segments : [1, 1]);
     this.quad.material = mat;
     this.quad.position.set(tr.x * w - w / 2, h / 2 - tr.y * h, tr.z);
@@ -355,7 +389,7 @@ void main(){ vec4 c = texture2D(tMap, vUv); float a = c.a * uOpacity; gl_FragCol
       cv = { cv: el, tex: new THREE.CanvasTexture(el) }; this.canvases.set("__wm", cv);
     }
     const mat = this.presMat(undefined, false); this.setBlend(mat, "normal");
-    mat.uniforms = { tMap: { value: cv.tex }, uOpacity: { value: 1 }, uPremult: { value: 0 }, uTime: { value: 0 }, uSize: { value: new THREE.Vector2(this.w, this.h) }, uC: { value: [0, 1, 2, 3].map(() => new THREE.Vector2()) }, uRes: { value: new THREE.Vector2(this.w, this.h) }, uCorners: { value: 0 } };
+    setUniforms(mat, { tMap: { value: cv.tex }, uOpacity: { value: 1 }, uPremult: { value: 0 }, uTime: { value: 0 }, uSize: { value: new THREE.Vector2(this.w, this.h) }, uC: { value: [0, 1, 2, 3].map(() => new THREE.Vector2()) }, uRes: { value: new THREE.Vector2(this.w, this.h) }, uCorners: { value: 0 } });
     this.quad.geometry = this.geo([1, 1]); this.quad.material = mat; this.quad.position.set(0, 0, 0); this.quad.scale.set(this.w, this.h, 1); this.quad.rotation.set(0, 0, 0);
     this.renderer.setRenderTarget(target); this.renderer.render(this.scene, this.ortho);
   }

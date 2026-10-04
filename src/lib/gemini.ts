@@ -134,6 +134,15 @@ export function mergeAi(base: Composition, ai: AiOutput, disabled: readonly stri
   }
   for (const [k, d] of Object.entries(ai.descs ?? {})) { const a = doc.assets[k]; if (a && (a.type === "video" || a.type === "audio")) a.desc ??= d; }
   doc.tracks = ai.tracks.map((t) => (t.kind === "video" ? { ...t, clips: t.clips.filter((c) => doc.assets[c.asset]?.type === "video") } : t)) as any;
+  // Les médias ajoutés à la main (images, sons) ne sont pas vus par l'IA : on conserve leurs pistes (ids rendus uniques, ancres retirées).
+  const taken = new Set(doc.tracks.flatMap((t) => [t.id, ...t.clips.map((c) => c.id)]));
+  const uniq = (id: string) => { let n = id, i = 2; while (taken.has(n)) n = `${id}_${i++}`; taken.add(n); return n; };
+  for (const t of base.tracks) {
+    const keep = t.kind === "audio" || (t.kind === "video" && t.clips.length > 0 && t.clips.every((c) => base.assets[c.asset]?.type === "image"));
+    if (!keep) continue;
+    const clips = (t.clips as any[]).filter((c) => !c.anchor).map((c) => ({ ...c, id: uniq(c.id) }));
+    if (clips.length) doc.tracks.push({ ...t, id: uniq(t.id), clips } as any);
+  }
   doc.transitions = ai.transitions;
   if (ai.grade) doc.grade = ai.grade; else delete doc.grade;
   return sanitize(CompositionS.parse(doc), disabled);
@@ -157,10 +166,10 @@ export async function callGemini(input: GeminiInput, onProgress?: (p: number, m:
   let i = 0;
   for (const r of input.rushes) {
     await onProgress?.(0.1 + (0.4 * i) / input.rushes.length, `Envoi du rush ${r.id}…`);
-    let f = await ai.files.upload({ file: r.proxy, config: { mimeType: "video/mp4", displayName: r.id } });
+    let f = await ai.files.upload({ file: r.proxy, config: { mimeType: r.proxy.type?.startsWith("video/") ? r.proxy.type : "video/mp4", displayName: r.id } });
     while (f.state === FileState.PROCESSING) { if (Date.now() - t0 > ANALYSIS.timeoutMs) throw new Error("Délai dépassé (traitement du rush)"); await sleep(ANALYSIS.pollMs); f = await ai.files.get({ name: f.name! }); }
     if (f.state === FileState.FAILED || !f.uri) throw new Error(`Gemini n'a pas pu lire le rush ${r.id}`);
-    parts.push({ fileData: { fileUri: f.uri, mimeType: f.mimeType ?? "video/mp4" }, videoMetadata: { fps: ANALYSIS.samplingFps } });
+    parts.push({ fileData: { fileUri: f.uri, mimeType: f.mimeType ?? (r.proxy.type?.startsWith("video/") ? r.proxy.type : "video/mp4") }, videoMetadata: { fps: ANALYSIS.samplingFps } });
     parts.push({ text: `RUSH ${r.id} — desc: "${(r.desc ?? "").replace(/"/g, "'")}" — w:${r.w} h:${r.h} — dur:${r.dur}ms — fps_source:${r.fps} — rot:${r.rot ?? 0} — audio:${r.hasAudio ? "oui" : "non"}` });
     i++;
   }

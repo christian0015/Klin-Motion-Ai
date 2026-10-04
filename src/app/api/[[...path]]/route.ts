@@ -13,6 +13,7 @@
  *   GET    /projects/:id                Projet complet (ETag = rev)
  *   PATCH  /projects/:id                { rev, doc?|name?|brief?|thumb?, force? } → 409 si rev ≠
  *   DELETE /projects/:id
+ *   DELETE /projects/:id/assets/:assetId  Supprime les fichiers cloud d'un rush (original + proxy) et libère le stockage
  *   GET    /projects/:id/versions       Métadonnées uniquement
  *   GET    /projects/:id/versions/:vid  Document d'une version (à la demande)
  *   POST   /projects/:id/versions       Version manuelle { label, doc }
@@ -42,11 +43,14 @@ import {
 } from "@/lib/db";
 import { estimateAnalysis, getProvider, grant, planOf, recordStorage, refund, reserve, settle, storageOk } from "@/lib/billing";
 import { ANALYSIS, callGemini, catalogTokens, fallbackDoc, mergeAi } from "@/lib/gemini";
-import { BriefS, CompositionS, EXAMPLE_DOC, migrate, ProjectCreateS, ProjectPatchS, SettingsS, DOC_LIMITS, emptyComposition } from "@/lib/schema";
+import { BriefS, CompositionS, EXAMPLE_DOC, migrate, type Composition, ProjectCreateS, ProjectPatchS, SettingsS, DOC_LIMITS, emptyComposition } from "@/lib/schema";
 import { EFFECTS } from "@/effects";
 
 export const maxDuration = 300;
 export const runtime = "nodejs";
+
+/** Rushs réellement placés sur une piste vidéo (les autres ne sont ni analysés ni facturés). */
+const usedAssets = (doc: Composition) => new Set(doc.tracks.flatMap((t) => (t.kind === "video" ? t.clips.map((c) => c.asset) : [])));
 
 /** Valeurs de départ des limites (section 9.6). Format : [fenêtre en secondes, maximum]. */
 const LIMITS = {
@@ -130,7 +134,7 @@ async function runJob(jobId: string) {
     const s = await getSettings();
     const rushes = [];
     for (const [id, a] of Object.entries(doc.assets)) {
-      if (a.type !== "video" || !a.proxy) continue;
+      if (a.type !== "video" || !a.proxy || !usedAssets(doc).has(id)) continue;
       if (!a.proxy.startsWith(`u/${uid}/`)) throw new Error("Clé de proxy invalide");
       const { aws, base } = r2cfg();
       const r = await aws.fetch(`${base}/${enc(a.proxy)}`);
@@ -245,6 +249,16 @@ add("DELETE", "projects/:id", "user", async ({ user, p }) => {
   await Promise.all([Project.deleteOne({ _id: oid(p[1]), ownerId: user.id }), Version.deleteMany({ projectId: oid(p[1]) }), Job.deleteMany({ projectId: oid(p[1]) }), Upload.deleteMany({ projectId: oid(p[1]) })]);
   return { ok: true };
 });
+add("DELETE", "projects/:id/assets/:assetId", "user", async ({ user, p }) => {
+  await own(user.id, p[1], "_id");
+  const aid = parse(safeId, p[3]), keys = (["original", "proxy"] as const).map((k) => keyOf(user.id, p[1], aid, k));
+  const ups = await Upload.find({ userId: user.id, projectId: oid(p[1]), key: { $in: keys } }).lean();
+  for (const k of keys) { try { await r2Delete(k); } catch { /* R2 absent ou objet déjà supprimé */ } }
+  const bytes = ups.filter((u: any) => u.done).reduce((a: number, u: any) => a + (u.size ?? 0), 0);
+  if (bytes) await recordStorage(user.id, -bytes, aid);
+  await Upload.deleteMany({ userId: user.id, projectId: oid(p[1]), key: { $in: keys } });
+  return { ok: true, freed: bytes };
+});
 add("GET", "projects/:id/versions", "user", async ({ user, p }) => {
   await own(user.id, p[1], "_id");
   const rows = await Version.find({ projectId: oid(p[1]) }).select("-doc -meta.raw").sort({ createdAt: -1 }).limit(100).lean();
@@ -321,8 +335,9 @@ add("POST", "upload/sign", "user", async ({ user, body }) => {
 // ---- Analyse
 async function analysisBase(userId: string, projectId: string) {
   const pr = await own(userId, projectId); const doc = migrate(pr.doc);
-  const vids = Object.values(doc.assets).filter((a) => a.type === "video" && a.proxy) as any[];
-  if (!vids.length) throw new HttpError(400, "Ajoutez au moins un rush (proxy envoyé) avant l'analyse.");
+  const used = usedAssets(doc);
+  const vids = Object.entries(doc.assets).filter(([id, a]) => a.type === "video" && a.proxy && used.has(id)).map(([, a]) => a) as any[];
+  if (!vids.length) throw new HttpError(400, "Aucun rush de la timeline n'est prêt pour l'analyse : ajoutez une vidéo à la timeline.");
   const s = await getSettings(); const u = await User.findById(userId).lean(); const plan = planOf(u, s);
   const total = vids.reduce((a, v) => a + v.dur, 0);
   if (total > plan.maxProxyMinutes * 60_000) throw new HttpError(413, `Durée maximale d'analyse : ${plan.maxProxyMinutes} min pour votre offre.`);

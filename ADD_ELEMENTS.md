@@ -393,6 +393,8 @@ Composition { v: 2, canvas:{w,h,fps}, assets:{ [id]: Asset }, grade?:{lut:id, am
 Num = number | { kf: [[tMs, valeur, easing?], …] }       Col = "#RRGGBB" | { kf: [[tMs, "#RRGGBB"], …] }
 
 Asset (vidéo) { type:"video", name?, desc?, w,h, dur, fps, rot?, hasAudio, bytes, fp, remote?, proxy?, words?: Word[] }
+Asset (image) { type:"image", name?, w, h, fp?, remote?, bytes? }          // se place dans un VideoClip : src:[0, duréeMs] = image fixe (fit "contain" par défaut)
+Asset (audio) { type:"audio", name?, dur, fp?, remote?, bytes?, words? }   // se place dans un AudioClip
 Word { t:"mot", s:ms, e:ms }                               // temps de la SOURCE, jamais de la timeline
 
 Track { id, kind, locked?, muted?, clips[] }               // kind: video | adjustment | overlay | text | caption | shape | audio
@@ -405,6 +407,7 @@ Transform { pos?:{x,y,z?}, scale?: Num | {x:Num,y:Num}, rot?: Num (°, horaire),
             // pos : fraction du canvas, (0.5,0.5) = centre, y vers le bas. pivot : ignoré.
 
 VideoClip      { id, asset, src:[ms,ms], speed?:Num, fit?:"cover"|"contain"|"fill", volume?:Num, …communs }
+               // « asset » peut être une vidéo OU une image : les fx, mesh, motion, transform et blend s'appliquent de la même façon aux images.
 AdjustmentClip { id, at?, dur?, span?:[idClipA,idClipB], fx:[…] }       // span : suit automatiquement ces clips
 OverlayClip    { id, effect, params?, at?, dur?, blend? }                // (transform/motion/fx/mesh ignorés)
 TextClip       { id, text?, counter?:{from,to,suffix?,dur}, style, params?, reveal?:{by,effect,stagger?}, …communs }

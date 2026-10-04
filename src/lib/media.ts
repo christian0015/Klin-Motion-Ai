@@ -6,7 +6,7 @@
  * Ne contient PAS : état global (store.ts), rendu (render.tsx), appels serveur à Gemini.
  * Jamais d'ArrayBuffer complet pour un rush : on garde des objets File (adossés au disque) et on copie par flux dans OPFS.
  */
-import { ALL_FORMATS, BlobSource, BufferTarget, Conversion, Input, Mp4OutputFormat, Output } from "mediabunny";
+import { ALL_FORMATS, BlobSource, BufferTarget, Conversion, Input, Mp4OutputFormat, Output, WebMOutputFormat, canEncodeAudio, canEncodeVideo } from "mediabunny";
 import type { VideoAsset } from "./schema";
 
 /* ───── API ───── */
@@ -72,7 +72,7 @@ export async function getFile(projectId: string, assetId: string, asset: { fp?: 
 }
 
 /* ───── Métadonnées ───── */
-export interface Probed { w: number; h: number; dur: number; fps: number; rot: 0 | 90 | 180 | 270; hasAudio: boolean; bytes: number; fp: string }
+export interface Probed { w: number; h: number; dur: number; fps: number; rot: 0 | 90 | 180 | 270; hasAudio: boolean; bytes: number; fp: string; codec: string; decodable: boolean }
 export async function probe(file: File): Promise<Probed> {
   const fp = await fingerprint(file);
   const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
@@ -84,27 +84,71 @@ export async function probe(file: File): Promise<Probed> {
     let fps = 30;
     try { const st = await v.computePacketStats(120); if (st.averagePacketRate > 1) fps = Math.round(st.averagePacketRate * 100) / 100; } catch { /* défaut 30 */ }
     const rot = ([0, 90, 180, 270].includes(v.rotation as number) ? v.rotation : 0) as 0 | 90 | 180 | 270;
-    return { w: v.displayWidth, h: v.displayHeight, dur: Math.round(dur * 1000), fps, rot, hasAudio: !!a, bytes: file.size, fp };
+    let decodable = true;
+    try { decodable = await v.canDecode(); } catch { decodable = false; }
+    return { w: v.displayWidth, h: v.displayHeight, dur: Math.round(dur * 1000), fps, rot, hasAudio: !!a, bytes: file.size, fp, codec: v.codec ?? "inconnu", decodable };
   } finally { input.dispose(); }
 }
 
-/* ───── Proxy d'analyse (client) : l'original reste intact ───── */
-export async function makeProxy(file: Blob, a: Pick<VideoAsset, "w" | "h">, cfg: { proxyShortSide: number; proxyFps: number }, onProgress?: (p: number) => void): Promise<Blob> {
-  if (typeof VideoEncoder === "undefined") throw new Error("Votre navigateur ne gère pas WebCodecs : utilisez Chrome, Edge ou Safari récent pour préparer l'analyse.");
-  const k = cfg.proxyShortSide / Math.min(a.w, a.h);
-  const even = (n: number) => Math.max(2, Math.round(n / 2) * 2);
+/* ───── Audio (musique) : durée + empreinte ───── */
+export async function probeAudio(file: File): Promise<{ dur: number; fp: string }> {
+  const fp = await fingerprint(file);
   const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
-  const output = new Output({ format: new Mp4OutputFormat(), target: new BufferTarget() });
-  const conv = await Conversion.init({
-    input, output,
-    video: { width: even(a.w * k), height: even(a.h * k), fit: "fill", frameRate: cfg.proxyFps, bitrate: 350_000, codec: "avc" },
-    audio: { numberOfChannels: 1, sampleRate: 16_000, bitrate: 32_000, codec: "aac" },
-  });
-  if (!conv.isValid) throw new Error("Impossible de préparer ce fichier pour l'analyse.");
-  conv.onProgress = (p) => onProgress?.(p);
-  await conv.execute();
-  input.dispose();
-  return new Blob([output.target.buffer!], { type: "video/mp4" });
+  try {
+    if (!(await input.getPrimaryAudioTrack())) throw new Error("Aucune piste audio dans ce fichier.");
+    return { dur: Math.round((await input.computeDuration()) * 1000), fp };
+  } finally { input.dispose(); }
+}
+
+/* ───── Image : dimensions + empreinte ───── */
+export async function probeImage(file: File): Promise<{ w: number; h: number; fp: string }> {
+  const fp = await fingerprint(file);
+  let bmp: ImageBitmap;
+  try { bmp = await createImageBitmap(file); } catch { throw new Error(`« ${file.name} » : image illisible (formats : PNG, JPEG, WebP, GIF, AVIF).`); }
+  const r = { w: bmp.width, h: bmp.height, fp }; bmp.close();
+  if (r.w > 16384 || r.h > 16384) throw new Error(`« ${file.name} » : image trop grande (16384 px maximum).`);
+  return r;
+}
+
+/* ───── Proxy d'analyse (client) : l'original reste intact ───── */
+const PROXY_FORMATS = [
+  { fmt: "mp4", v: "avc", a: "aac", mime: "video/mp4" },
+  { fmt: "webm", v: "vp9", a: "opus", mime: "video/webm" },
+  { fmt: "webm", v: "vp8", a: "opus", mime: "video/webm" },
+] as const;
+const WHY: Record<string, string> = {
+  undecodable_source_codec: "le navigateur ne sait pas décoder ce fichier (souvent HEVC/H.265 d'un iPhone ou d'une caméra)",
+  unknown_source_codec: "codec vidéo inconnu",
+  no_encodable_target_codec: "le navigateur ne peut pas encoder le proxy",
+};
+/** Renvoie un Blob dont `.type` est le vrai type MIME (mp4 ou webm selon ce que le navigateur sait encoder). */
+export async function makeProxy(file: Blob, a: Pick<VideoAsset, "w" | "h" | "hasAudio">, cfg: { proxyShortSide: number; proxyFps: number }, onProgress?: (p: number) => void): Promise<Blob> {
+  if (typeof VideoEncoder === "undefined") throw new Error("Votre navigateur ne gère pas WebCodecs : utilisez Chrome ou Edge récent sur ordinateur pour préparer l'analyse.");
+  const k = cfg.proxyShortSide / Math.min(a.w, a.h), even = (n: number) => Math.max(2, Math.round(n / 2) * 2);
+  const width = even(a.w * k), height = even(a.h * k);
+  let pick: (typeof PROXY_FORMATS)[number] | null = null;
+  for (const o of PROXY_FORMATS) {
+    if (!(await canEncodeVideo(o.v, { width, height, bitrate: 350_000 }).catch(() => false))) continue;
+    if (a.hasAudio && !(await canEncodeAudio(o.a, { numberOfChannels: 1, sampleRate: 48_000, bitrate: 32_000 }).catch(() => false))) continue;
+    pick = o; break;
+  }
+  if (!pick) throw new Error("Ce navigateur ne peut encoder ni H.264 ni VP9 : utilisez Chrome ou Edge à jour sur ordinateur.");
+  const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
+  try {
+    const output = new Output({ format: pick.fmt === "mp4" ? new Mp4OutputFormat() : new WebMOutputFormat(), target: new BufferTarget() });
+    const conv = await Conversion.init({
+      input, output,
+      video: { width, height, fit: "fill", frameRate: cfg.proxyFps, bitrate: 350_000, codec: pick.v },
+      audio: { numberOfChannels: 1, sampleRate: 48_000, bitrate: 32_000, codec: pick.a },
+    });
+    if (!conv.isValid) {
+      const why = [...new Set(conv.discardedTracks.map((d) => WHY[d.reason] ?? d.reason))].join(" ; ") || "aucune piste exploitable";
+      throw new Error(`Impossible de préparer ce fichier pour l'analyse : ${why}. Convertissez la vidéo en H.264 (MP4) ou essayez avec Chrome/Edge sur ordinateur.`);
+    }
+    conv.onProgress = (p) => onProgress?.(p);
+    await conv.execute();
+    return new Blob([output.target.buffer!], { type: pick.mime });
+  } finally { input.dispose(); }
 }
 
 /* ───── Envoi en arrière-plan (reprenable) ───── */

@@ -5,7 +5,7 @@
  * Ne contient PAS : calculs de temps (engine.ts) ni modification directe du document (tout passe par les actions du store).
  */
 "use client";
-import { useMemo, useRef } from "react";
+import { useMemo, useRef, useState } from "react";
 import { layoutDoc, wordsOf, srcToTimeline, type Placed } from "@/lib/engine";
 import { useEditor } from "@/lib/store";
 import type { TrackKind, VideoClip } from "@/lib/schema";
@@ -15,13 +15,36 @@ const KIND: Record<TrackKind, { label: string; bar: string }> = {
   video: { label: "Vidéo", bar: "bg-k-video" }, adjustment: { label: "Effets", bar: "bg-k-adjustment" }, overlay: { label: "Overlay", bar: "bg-k-overlay" },
   text: { label: "Texte", bar: "bg-k-text" }, caption: { label: "Sous-titres", bar: "bg-k-caption" }, shape: { label: "Formes", bar: "bg-k-shape" }, audio: { label: "Audio", bar: "bg-k-audio" },
 };
-const ROW = 38, HEAD = 112, SNAP_PX = 8;
+const ROW = 38, HEAD = 156, SNAP_PX = 8;
 
 export default function Timeline() {
   const doc = useEditor((s) => s.doc), t = useEditor((s) => s.t), zoom = useEditor((s) => s.zoom), selection = useEditor((s) => s.selection);
   const act = useEditor.getState();
   const layout = useMemo(() => layoutDoc(doc), [doc]);
   const scroller = useRef<HTMLDivElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null), audioTarget = useRef<string>("");
+  const [notice, setNotice] = useState("");
+  const flash = (m: string) => { setNotice(m); setTimeout(() => setNotice(""), 6000); };
+  /** « + » d'une piste : ajoute l'élément par défaut du type (ou ouvre le sélecteur de fichier son pour l'audio). */
+  const addTo = (trackId: string, kind: TrackKind) => {
+    if (kind === "audio") { audioTarget.current = trackId; fileRef.current?.click(); return; }
+    const r = act.addDefaultClip(trackId); if (r.msg) flash(r.msg);
+  };
+  /** Menu « + Piste » : la piste est créée AVEC son élément par défaut ; si c'est impossible, rien n'est créé (pas de piste vierge). */
+  const addTrackWithDefault = (kind: TrackKind) => {
+    if (kind === "audio") { audioTarget.current = ""; fileRef.current?.click(); return; }
+    const id = act.addTrack(kind), r = act.addDefaultClip(id);
+    if (!r.ok) act.undo();
+    if (r.msg) flash(r.msg);
+  };
+  const onAudioFile = async (file?: File) => {
+    if (!file) return;
+    const created = !audioTarget.current, trackId = audioTarget.current || act.addTrack("audio");
+    const r = await act.importAudio(file, trackId);
+    if (!r.ok && created) act.undo();
+    flash(r.ok ? "Audio ajouté." : (r.msg ?? "Audio illisible."));
+  };
+
   const width = Math.max(layout.duration + 4000, 12000) * zoom;
   const ticks = useMemo(() => { const step = zoom > 0.15 ? 1000 : zoom > 0.05 ? 2000 : zoom > 0.025 ? 5000 : 10000; return Array.from({ length: Math.ceil((layout.duration + 4000) / step) + 1 }, (_, i) => i * step); }, [layout.duration, zoom]);
 
@@ -73,23 +96,27 @@ export default function Timeline() {
         <span className="mx-1 h-3 w-px bg-line" />
         <button className="btn !px-2 !py-0.5" onClick={act.splitAtPlayhead} title="S">Couper</button>
         <button className="btn !px-2 !py-0.5" onClick={act.deleteSelected} disabled={!selection} title="Suppr">Supprimer</button>
-        <select className="field !w-auto !py-0.5 !text-xs" value="" onChange={(e) => { if (e.target.value) act.addTrack(e.target.value as TrackKind); }} aria-label="Ajouter une piste">
-          <option value="">+ Piste</option>{(Object.keys(KIND) as TrackKind[]).map((k) => <option key={k} value={k}>{KIND[k].label}</option>)}
+        <select className="field !w-auto !py-0.5 !text-xs" value="" onChange={(e) => { if (e.target.value) addTrackWithDefault(e.target.value as TrackKind); }} aria-label="Ajouter une piste">
+          <option value="">+ Piste (avec un élément)</option>{(Object.keys(KIND) as TrackKind[]).filter((k) => k !== "shape").map((k) => <option key={k} value={k}>{KIND[k].label}</option>)}
         </select>
+        {notice && <span role="status" className="ml-2 truncate text-warn">{notice}</span>}
+        <input ref={fileRef} type="file" accept="audio/*" hidden onChange={(e) => { void onAudioFile(e.target.files?.[0]); e.target.value = ""; }} />
       </div>
       <div ref={scroller} className="relative min-h-0 flex-1 overflow-auto">
         <div className="relative" style={{ width: width + HEAD, minHeight: "100%" }}>
           {/* règle */}
           <div className="sticky top-0 z-20 flex h-6 cursor-col-resize border-b border-line bg-panel" onPointerDown={seek}>
-            <div className="sticky left-0 z-30 w-28 shrink-0 border-r border-line bg-panel" />
+            <div className="sticky left-0 z-30 shrink-0 border-r border-line bg-panel" style={{ width: HEAD }} />
             <div className="relative flex-1">{ticks.map((ms) => <span key={ms} className="absolute top-0 h-full border-l border-line pl-1 font-mono text-[10px] text-muted" style={{ left: ms * zoom }}>{ms / 1000}s</span>)}</div>
           </div>
           {doc.tracks.length === 0 && <p className="p-6 text-sm text-muted">Aucune piste. Ajoutez un rush depuis le panneau de gauche.</p>}
           {[...doc.tracks].map((tr, ti) => ({ tr, ti })).reverse().map(({ tr, ti }) => (
             <div key={tr.id} className="flex border-b border-line/60" style={{ height: ROW }}>
-              <div className="sticky left-0 z-10 flex w-28 shrink-0 items-center justify-between gap-1 border-r border-line bg-panel px-2 text-xs">
+              <div className="sticky left-0 z-10 flex shrink-0 items-center justify-between gap-1 border-r border-line bg-panel px-2 text-xs" style={{ width: HEAD }}>
                 <span className="truncate"><i className={`mr-1.5 inline-block h-2 w-2 rounded-sm align-middle ${KIND[tr.kind].bar}`} />{KIND[tr.kind].label}</span>
                 <span className="flex gap-0.5">
+                  <button className="rounded bg-raised px-1.5 font-semibold text-accent-2" onClick={() => addTo(tr.id, tr.kind)} aria-label={tr.kind === "audio" ? "Importer un fichier audio" : "Ajouter un élément"} title={tr.kind === "audio" ? "Importer un fichier audio" : "Ajouter un élément par défaut au playhead"}>{tr.kind === "audio" ? "♪" : "+"}</button>
+                  {tr.clips.length === 0 && <button className="rounded px-1 text-muted hover:text-bad" onClick={() => act.removeTrack(tr.id)} aria-label="Supprimer la piste vide" title="Supprimer la piste vide">×</button>}
                   <button className={`rounded px-1 ${tr.muted ? "text-accent" : "text-muted"}`} onClick={() => act.toggleTrack(tr.id, "muted")} aria-label="Muet" title="Muet">M</button>
                   <button className={`rounded px-1 ${tr.locked ? "text-accent" : "text-muted"}`} onClick={() => act.toggleTrack(tr.id, "locked")} aria-label="Verrouiller" title="Verrouiller">V</button>
                 </span>
@@ -122,12 +149,12 @@ export default function Timeline() {
 
 function label(p: Placed, doc: ReturnType<typeof useEditor.getState>["doc"]): string {
   const c: any = p.clip;
-  if (p.kind === "video") return doc.assets[c.asset]?.type === "video" ? ((doc.assets[c.asset] as any).name ?? c.asset) : c.asset;
+  if (p.kind === "video") return (doc.assets[c.asset] as { name?: string } | undefined)?.name ?? c.asset;
   if (p.kind === "text") return c.text ?? c.style;
   if (p.kind === "caption") return "Sous-titres";
   if (p.kind === "overlay") return c.effect;
   if (p.kind === "adjustment") return (c.fx ?? []).map((f: any) => f.id).join(", ") || "Calque";
-  return c.asset ?? c.id;
+  return (doc.assets[c.asset] as { name?: string } | undefined)?.name ?? c.asset ?? c.id;
 }
 /** Positions (ms relatives au clip) des mots d'un sous-titre : ils sont visibles dans la timeline. */
 function captionTicks(p: Placed, doc: ReturnType<typeof useEditor.getState>["doc"]): number[] {

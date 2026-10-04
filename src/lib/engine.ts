@@ -275,7 +275,7 @@ export function splitClipAt(doc: Composition, layout: Layout, clipId: string, t:
       b.src = [mid, c.src[1]]; c.src = [c.src[0], mid];
       if (isKf(c.speed)) { b.speed = c.speed; }
       if (tr.kind === "video" && !tr.magnetic) { b.at = t; c.dur = t - p.at; b.dur = p.at + p.dur - t; }
-      else if (tr.kind === "audio") { b.at = t; }
+      else if (tr.kind === "audio") { b.at = t; c.dur = t - p.at; b.dur = p.at + p.dur - t; }
     } else { c.at = p.at; c.dur = t - p.at; b.at = t; b.dur = p.at + p.dur - t; }
     tr.clips.splice(i + 1, 0, b);
     return newId;

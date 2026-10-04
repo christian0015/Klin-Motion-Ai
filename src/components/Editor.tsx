@@ -8,6 +8,7 @@
 "use client";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { nanoid } from "nanoid";
 import Preview from "./Preview";
 import Timeline from "./Timeline";
@@ -15,15 +16,18 @@ import Inspector from "./Inspector";
 import { useEditor, type VersionMeta } from "@/lib/store";
 import { ApiError, api, fingerprint, getFile, hasLocal, importRush, makeProxy, probe, remember, uploadBlob } from "@/lib/media";
 import { exportMp4 } from "@/lib/render";
-import { validate } from "@/lib/engine";
+import { layoutDoc, validate } from "@/lib/engine";
 import { getEffect } from "@/effects";
-import type { Brief, Composition } from "@/lib/schema";
+import type { Asset, Brief, Composition } from "@/lib/schema";
+
+type MediaAsset = Extract<Asset, { type: "video" | "image" | "audio" }>;
 
 interface Me { credits: number; limits: { watermark: boolean }; analysis: { proxyShortSide: number; proxyFps: number }; disabledEffects: string[] }
 interface Initial { id: string; name: string; rev: number; brief: Brief; doc: Composition }
 
 export default function Editor({ initial }: { initial: Initial }) {
-  const s = useEditor();
+  // Abonnement CIBLÉ : surtout pas au store entier (le temps `t` change à chaque image et ferait recréer l'aperçu).
+  const s = useEditor(useShallow((st) => ({ doc: st.doc, save: st.save, name: st.name, brief: st.brief, status: st.status, progress: st.progress, message: st.message, sync: st.sync, versions: st.versions, past: st.past, future: st.future, disabled: st.disabled, projectId: st.projectId, problems: st.problems })));
   const [me, setMe] = useState<Me | null>(null);
   const [left, setLeft] = useState<"rushs" | "brief" | "history">("rushs");
   const [toast, setToast] = useState<{ kind: "ok" | "err"; msg: string } | null>(null);
@@ -31,6 +35,8 @@ export default function Editor({ initial }: { initial: Initial }) {
   const abort = useRef<AbortController | null>(null);
   const say = useCallback((kind: "ok" | "err", msg: string) => { setToast({ kind, msg }); setTimeout(() => setToast(null), 7000); }, []);
   const act = useEditor.getState();
+  const onMissing = useCallback((id: string) => useEditor.getState().setSync(id, { state: "missing" }), []);
+  const onProblem = useCallback((id: string, msg: string) => useEditor.getState().setProblem(id, msg), []);
 
   /* ───── chargement ───── */
   useEffect(() => {
@@ -39,8 +45,9 @@ export default function Editor({ initial }: { initial: Initial }) {
     void act.loadVersions();
     (async () => {
       for (const [id, a] of Object.entries(initial.doc.assets)) {
-        if (a.type !== "video") continue;
-        const local = await hasLocal(a.fp);
+        if (a.type !== "video" && a.type !== "image" && a.type !== "audio") continue;
+        const fp = (a as { fp?: string }).fp; if (!fp) continue;
+        const local = await hasLocal(fp);
         useEditor.getState().setSync(id, { state: local ? (a.remote ? "synced" : "local") : a.remote ? "synced" : "missing", progress: a.remote ? 1 : 0 });
       }
     })();
@@ -66,41 +73,56 @@ export default function Editor({ initial }: { initial: Initial }) {
   }, []);
 
   const warnings = useMemo(() => validate(s.doc, (id) => !!getEffect(id, new Set(s.disabled))), [s.doc, s.disabled]);
+  const mediaAssets = Object.entries(s.doc.assets).filter((e): e is [string, MediaAsset] => e[1].type === "video" || e[1].type === "image" || e[1].type === "audio");
   const videoAssets = Object.entries(s.doc.assets).filter(([, a]) => a.type === "video") as [string, Extract<Composition["assets"][string], { type: "video" }>][];
+  const used = useMemo(() => new Set(layoutDoc(s.doc).list.filter((p) => p.kind === "video" || p.kind === "audio").map((p) => (p.clip as { asset: string }).asset)), [s.doc]);
+  const hasVideoUsed = videoAssets.some(([id]) => used.has(id));
   const busy = s.status !== "ready" && s.status !== "idle" && s.status !== "error";
 
   /* ───── import + envoi cloud en arrière-plan (non bloquant) ───── */
   const syncOriginal = async (assetId: string, file: File, fp: string) => {
-    const st = useEditor.getState(); st.setSync(assetId, { state: "uploading", progress: 0 });
-    try {
-      const key = await uploadBlob(file, { projectId: st.projectId, assetId, kind: "original", type: file.type || "video/mp4", fp }, (p) => useEditor.getState().setSync(assetId, { progress: p }));
-      useEditor.getState().silent((d) => { const a = d.assets[assetId]; if (a?.type === "video") a.remote = key; });
-      useEditor.getState().setSync(assetId, { state: "synced", progress: 1 });
-    } catch (e) {
+    const m = await useEditor.getState().syncAsset(assetId, file, fp); if (m) say("err", m);
+  };
+  const addVideos = async (files: File[]) => {
+    for (const file of files) {
+      const p = await importRush(file), assetId = nanoid(6);
+      useEditor.getState().apply("Ajouter un rush", (d) => {
+        d.assets[assetId] = { type: "video", name: file.name, w: p.w, h: p.h, dur: p.dur, fps: p.fps, rot: p.rot, hasAudio: p.hasAudio, bytes: p.bytes, fp: p.fp };
+        let tr = d.tracks.find((t) => t.kind === "video" && t.magnetic);
+        if (!tr) { d.tracks.unshift({ id: "v1", kind: "video", magnetic: true, clips: [] }); tr = d.tracks[0]; }
+        (tr.clips as any[]).push({ id: nanoid(6), asset: assetId, src: [0, p.dur] });
+      });
       useEditor.getState().setSync(assetId, { state: "local", progress: 0 });
-      say("err", e instanceof ApiError && e.status === 503 ? "Stockage cloud non configuré : le rush reste local sur cet appareil." : e instanceof ApiError && e.status === 402 ? "Quota de stockage atteint : le rush reste local." : "Envoi cloud interrompu : le rush reste disponible en local.");
+      if (!p.decodable) {
+        const m = `Codec « ${p.codec} » non lisible par ce navigateur : l'aperçu restera noir et l'analyse échouera. Convertissez la vidéo en H.264 (MP4).`;
+        useEditor.getState().setProblem(assetId, m); say("err", m);
+      }
+      void syncOriginal(assetId, file, p.fp);
     }
   };
-  const addFiles = async (files: FileList | null) => {
-    if (!files?.length) return;
-    act.setStatus("importing", 0, "Lecture des rushs…");
+  /** Un seul point d'entrée : vidéos, images et sons sont aiguillés selon leur type. */
+  const addMedia = async (list: FileList | null) => {
+    if (!list?.length) return;
+    const files = Array.from(list), st = () => useEditor.getState();
+    act.setStatus("importing", 0, "Lecture des médias…");
     try {
-      for (const file of Array.from(files)) {
-        if (!file.type.startsWith("video/")) { say("err", `« ${file.name} » n'est pas une vidéo.`); continue; }
-        const p = await importRush(file), assetId = nanoid(6);
-        useEditor.getState().apply("Ajouter un rush", (d) => {
-          d.assets[assetId] = { type: "video", name: file.name, w: p.w, h: p.h, dur: p.dur, fps: p.fps, rot: p.rot, hasAudio: p.hasAudio, bytes: p.bytes, fp: p.fp };
-          let tr = d.tracks.find((t) => t.kind === "video" && t.magnetic);
-          if (!tr) { d.tracks.unshift({ id: "v1", kind: "video", magnetic: true, clips: [] }); tr = d.tracks[0]; }
-          (tr.clips as any[]).push({ id: nanoid(6), asset: assetId, src: [0, p.dur] });
-        });
-        useEditor.getState().setSync(assetId, { state: "local", progress: 0 });
-        void syncOriginal(assetId, file, p.fp);
+      await addVideos(files.filter((f) => f.type.startsWith("video/")));
+      for (const f of files) {
+        if (f.type.startsWith("image/")) { const r = await st().importImage(f); if (!r.ok) say("err", r.msg ?? "Image illisible."); }
+        else if (f.type.startsWith("audio/")) { const r = await st().importAudio(f); if (!r.ok) say("err", r.msg ?? "Audio illisible."); }
+        else if (!f.type.startsWith("video/")) say("err", `« ${f.name} » : type non pris en charge (vidéo, image ou audio).`);
       }
       act.setStatus("ready");
     } catch (e) { act.setStatus("error", 0, (e as Error).message); say("err", (e as Error).message); }
   };
   /** Redonne un fichier à un rush. Projet d'exemple : n'importe quelle vidéo convient et remplace les métadonnées fictives. */
+  const placeAsset = (assetId: string) => { const r = useEditor.getState().placeAsset(assetId); if (r.msg) say("err", r.msg); };
+  const removeRush = (assetId: string, name: string) => {
+    const n = layoutDoc(useEditor.getState().doc).list.filter((p) => (p.kind === "video" || p.kind === "audio") && (p.clip as { asset?: string }).asset === assetId).length;
+    if (!window.confirm(`Supprimer « ${name} » ?${n ? ` ${n} clip(s) de la timeline seront retirés (Ctrl+Z les restaure).` : ""} La copie cloud est supprimée.`)) return;
+    const st = useEditor.getState(); st.removeAsset(assetId);
+    void api(`projects/${st.projectId}/assets/${assetId}`, "DELETE").catch(() => {});
+  };
   const relink = async (assetId: string, a: { fp: string }, file?: File) => {
     if (!file) return;
     if (a.fp.startsWith("example-")) {
@@ -126,17 +148,18 @@ export default function Editor({ initial }: { initial: Initial }) {
 
   /* ───── analyse IA : proxys → estimation → confirmation → job → un seul patch ───── */
   const prepareAndEstimate = async () => {
-    if (!videoAssets.length) { say("err", "Ajoutez au moins un rush."); return; }
+    const targets = videoAssets.filter(([id]) => used.has(id));
+    if (!targets.length) { say("err", "Aucun rush dans la timeline : ajoutez une vidéo, ou utilisez « Ajouter à la timeline » dans le panneau Rushs."); return; }
     try {
       const cfg = me?.analysis ?? { proxyShortSide: 240, proxyFps: 12 }; const st = useEditor.getState();
       let i = 0;
-      for (const [id, a] of videoAssets) {
+      for (const [id, a] of targets) {
         if (a.proxy) { i++; continue; }
-        st.setStatus("proxying", i / videoAssets.length, `Préparation de « ${a.name ?? id} »…`);
+        st.setStatus("proxying", i / targets.length, `Préparation de « ${a.name ?? id} »…`);
         const file = await getFile(st.projectId, id, a, () => st.setSync(id, { state: "downloading" }));
-        if (!file) throw new Error(`Rush manquant : « ${a.name ?? id} ». Redonnez le fichier dans le panneau Rushs.`);
-        const proxy = await makeProxy(file, a, cfg, (p) => st.setStatus("proxying", (i + p) / videoAssets.length, `Préparation de « ${a.name ?? id} »…`));
-        const key = await uploadBlob(proxy, { projectId: st.projectId, assetId: id, kind: "proxy", type: "video/mp4", fp: a.fp });
+        if (!file) throw new Error(a.fp.startsWith("example-") ? "Le projet d'exemple n'a pas de vraie vidéo : utilisez « Relier une vraie vidéo » dans le panneau Rushs." : `Rush manquant : « ${a.name ?? id} ». Redonnez le fichier dans le panneau Rushs.`);
+        const proxy = await makeProxy(file, a, cfg, (p) => st.setStatus("proxying", (i + p) / targets.length, `Préparation de « ${a.name ?? id} »…`));
+        const key = await uploadBlob(proxy, { projectId: st.projectId, assetId: id, kind: "proxy", type: proxy.type || "video/mp4", fp: a.fp });
         useEditor.getState().silent((d) => { const x = d.assets[id]; if (x?.type === "video") x.proxy = key; });
         i++;
       }
@@ -206,7 +229,7 @@ export default function Editor({ initial }: { initial: Initial }) {
         <button className="btn !py-1" onClick={act.undo} disabled={!s.past.length} title="Ctrl+Z">Annuler</button>
         <button className="btn !py-1" onClick={act.redo} disabled={!s.future.length} title="Ctrl+Maj+Z">Rétablir</button>
         {me && <span className="chip" title="Crédits restants">{me.credits} crédits</span>}
-        <button className="btn btn-primary" onClick={prepareAndEstimate} disabled={busy || !videoAssets.length}>Monter avec l'IA</button>
+        <button className="btn btn-primary" onClick={prepareAndEstimate} disabled={busy || !hasVideoUsed}>Monter avec l'IA</button>
         <select className="field !w-auto !py-1.5" value="" disabled={busy || !s.doc.tracks.length} onChange={(e) => { if (e.target.value) void doExport(+e.target.value); }} aria-label="Exporter">
           <option value="">Exporter en MP4</option><option value={s.doc.canvas.w}>Pleine résolution ({s.doc.canvas.w} px)</option><option value={720}>720 px de large</option>
         </select>
@@ -226,23 +249,32 @@ export default function Editor({ initial }: { initial: Initial }) {
       <div className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[auto_minmax(0,1fr)_minmax(220px,36%)] lg:grid-cols-[300px_minmax(0,1fr)_320px] lg:grid-rows-[minmax(0,1fr)_minmax(220px,36%)]">
         {/* gauche */}
         <aside className="min-h-0 overflow-y-auto border-b border-line bg-panel lg:row-span-1 lg:border-b-0 lg:border-r">
-          <div className="flex border-b border-line text-sm">{([["rushs", "Rushs"], ["brief", "Brief"], ["history", "Historique"]] as const).map(([k, l]) => <button key={k} onClick={() => setLeft(k)} className={`flex-1 py-2 ${left === k ? "border-b-2 border-accent" : "text-muted"}`}>{l}</button>)}</div>
+          <div className="flex border-b border-line text-sm">{([["rushs", "Médias"], ["brief", "Brief"], ["history", "Historique"]] as const).map(([k, l]) => <button key={k} onClick={() => setLeft(k)} className={`flex-1 py-2 ${left === k ? "border-b-2 border-accent" : "text-muted"}`}>{l}</button>)}</div>
           {left === "rushs" && (
             <div className="space-y-3 p-3">
-              <label className="btn btn-primary w-full cursor-pointer">Ajouter des rushs<input type="file" accept="video/*" multiple hidden onChange={(e) => { void addFiles(e.target.files); e.target.value = ""; }} /></label>
-              {!videoAssets.length && <p className="font-display text-2xl text-muted">Déposez vos rushs pour commencer.</p>}
-              {videoAssets.map(([id, a]) => {
-                const sy = s.sync[id];
+              <label className="btn btn-primary w-full cursor-pointer">Ajouter des médias<input type="file" accept="video/*,image/*,audio/*" multiple hidden onChange={(e) => { void addMedia(e.target.files); e.target.value = ""; }} /></label>
+              <p className="text-[11px] text-muted">Vidéos, images (PNG, JPEG, WebP, GIF) et sons (MP3, WAV, M4A, OGG).</p>
+              {!mediaAssets.length && <p className="font-display text-2xl text-muted">Déposez vos vidéos, images et sons pour commencer.</p>}
+              {mediaAssets.map(([id, a]) => {
+                const sy = s.sync[id], fp = (a as { fp?: string }).fp ?? "", example = fp.startsWith("example-");
+                const mb = (a as { bytes?: number }).bytes ? ` · ${((a as { bytes: number }).bytes / 1048576).toFixed(1)} Mo` : "";
+                const meta = a.type === "audio" ? `${(a.dur / 1000).toFixed(1)} s${mb}` : a.type === "image" ? `${a.w}×${a.h}${mb}` : `${(a.dur / 1000).toFixed(1)} s · ${a.w}×${a.h}${mb}`;
                 return (
                   <div key={id} className="rounded-lg border border-line p-2 text-xs">
-                    <p className="truncate font-medium" title={a.name}>{a.name ?? id}</p>
-                    <p className="text-muted">{(a.dur / 1000).toFixed(1)} s · {a.w}×{a.h} · {Math.round(a.bytes / 1048576)} Mo</p>
-                    <input className="field mt-1.5 !py-1" placeholder="Description (optionnel, lue par l'IA)" defaultValue={a.desc ?? ""} maxLength={500} onBlur={(e) => act.apply("Description du rush", (d) => { const x = d.assets[id]; if (x?.type === "video") x.desc = e.target.value || undefined; })} />
+                    <p className="truncate font-medium" title={a.name}><span className="chip mr-1.5">{a.type === "video" ? "Vidéo" : a.type === "image" ? "Image" : "Audio"}</span>{a.name ?? id}</p>
+                    <p className="mt-0.5 text-muted">{meta}</p>
+                    {a.type === "video" && <input className="field mt-1.5 !py-1" placeholder="Description (optionnel, lue par l'IA)" defaultValue={a.desc ?? ""} maxLength={500} onBlur={(e) => act.apply("Description du rush", (d) => { const x = d.assets[id]; if (x?.type === "video") x.desc = e.target.value || undefined; })} />}
                     <p className={`mt-1.5 ${sy?.state === "missing" ? "text-warn" : "text-muted"}`}>
-                      {sy?.state === "uploading" ? `Synchronisation… ${Math.round(sy.progress * 100)} %` : sy?.state === "synced" ? "Synchronisé ✓" : sy?.state === "downloading" ? "Téléchargement depuis le cloud…" : sy?.state === "missing" ? (a.fp.startsWith("example-") ? "Exemple : aucune vidéo réelle" : "Fichier absent de cet appareil") : "Local (non synchronisé)"}
-                      {a.proxy ? " · prêt pour l'IA" : ""}
+                      {sy?.state === "uploading" ? `Synchronisation… ${Math.round(sy.progress * 100)} %` : sy?.state === "synced" ? "Synchronisé ✓" : sy?.state === "downloading" ? "Téléchargement depuis le cloud…" : sy?.state === "missing" ? (example ? "Exemple : aucune vidéo réelle" : "Fichier absent de cet appareil") : "Local (non synchronisé)"}
+                      {a.type === "video" && a.proxy ? " · prêt pour l'IA" : ""}{!used.has(id) ? " · non utilisé dans la timeline" : ""}
                     </p>
-                    {sy?.state === "missing" && <label className="btn mt-1.5 w-full cursor-pointer !py-1">{a.fp.startsWith("example-") ? "Relier une vraie vidéo" : "Redonner le fichier"}<input type="file" accept="video/*" hidden onChange={(e) => { void relink(id, a, e.target.files?.[0]); e.target.value = ""; }} /></label>}
+                    {sy?.error && <p className="mt-1 text-warn">{sy.error}</p>}
+                    <div className="mt-1.5 flex gap-1.5">
+                      {!used.has(id) && <button className="btn !px-2 !py-0.5" onClick={() => placeAsset(id)}>Ajouter à la timeline</button>}
+                      <button className="btn !px-2 !py-0.5 text-bad" onClick={() => removeRush(id, a.name ?? id)}>Supprimer</button>
+                    </div>
+                    {s.problems[id] && <p className="mt-1.5 rounded border border-bad/40 bg-bad/10 p-1.5 text-bad">{s.problems[id]}</p>}
+                    {sy?.state === "missing" && <label className="btn mt-1.5 w-full cursor-pointer !py-1">{example ? "Relier une vraie vidéo" : "Redonner le fichier"}<input type="file" accept={`${a.type}/*`} hidden onChange={(e) => { void relink(id, { fp }, e.target.files?.[0]); e.target.value = ""; }} /></label>}
                   </div>
                 );
               })}
@@ -271,7 +303,7 @@ export default function Editor({ initial }: { initial: Initial }) {
           )}
         </aside>
         {/* centre */}
-        <main className="min-h-[360px] min-w-0 p-3"><Preview onMissing={(id) => useEditor.getState().setSync(id, { state: "missing" })} /></main>
+        <main className="min-h-[360px] min-w-0 p-3"><Preview onMissing={onMissing} onProblem={onProblem} /></main>
         {/* droite */}
         <aside className="hidden min-h-0 border-l border-line bg-panel lg:block"><Inspector /></aside>
         {/* bas */}

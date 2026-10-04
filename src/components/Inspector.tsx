@@ -73,6 +73,7 @@ export default function Inspector() {
   const p = sel ? layout.byId[sel] : undefined;
   const clip: any = p?.clip, track = p ? doc.tracks[p.trackIdx] : undefined;
   const local = p ? Math.max(0, t - p.at) : 0;
+  const isImage = track?.kind === "video" && doc.assets[clip?.asset]?.type === "image";
   const mut = (fn: (c: any, tr: any) => void, label = "Modifier") => act.apply(label, (d) => { for (const tr of d.tracks) { const c = (tr.clips as any[]).find((x) => x.id === sel); if (c) fn(c, tr); } }, true);
   const setParam = (list: "fx" | "mesh" | "params", idx: number, k: string, v: any) => mut((c) => { const o = list === "fx" ? c.fx[idx] : list === "mesh" ? c.mesh : c; o.params = { ...(o.params ?? {}), [k]: v }; });
 
@@ -98,9 +99,16 @@ export default function Inspector() {
             </Section>
 
             {track!.kind === "video" && (
-              <Section title="Vidéo">
-                <NumField label="vitesse" value={clip.speed} def={1} min={0.1} max={4} local={local} onChange={(n) => mut((c) => { c.speed = n; })} />
-                <NumField label="volume" value={clip.volume} def={1} min={0} max={1} local={local} onChange={(n) => mut((c) => { c.volume = n; })} />
+              <Section title={isImage ? "Image" : "Vidéo"}>
+                {isImage ? (
+                  <label className="flex items-center gap-2 text-xs"><span className="w-20 text-muted">durée (ms)</span>
+                    <input type="number" min={100} step={100} className="field !w-24 !py-0.5 font-mono" value={Math.round(p!.dur)} onChange={(e) => { const v = Math.max(100, +e.target.value); mut((c) => { c.src = [c.src[0], c.src[0] + v]; if (c.dur !== undefined) c.dur = v; }); }} /></label>
+                ) : (
+                  <>
+                    <NumField label="vitesse" value={clip.speed} def={1} min={0.1} max={4} local={local} onChange={(n) => mut((c) => { c.speed = n; })} />
+                    <NumField label="volume" value={clip.volume} def={1} min={0} max={1} local={local} onChange={(n) => mut((c) => { c.volume = n; })} />
+                  </>
+                )}
                 <label className="mt-1.5 flex items-center gap-2 text-xs"><span className="w-20 text-muted">cadrage</span>
                   <select className="field !py-0.5" value={clip.fit ?? "cover"} onChange={(e) => mut((c) => { c.fit = e.target.value; })}><option value="cover">remplir</option><option value="contain">contenir</option><option value="fill">étirer</option></select></label>
               </Section>
@@ -121,12 +129,15 @@ export default function Inspector() {
             )}
             {track!.kind === "overlay" && (
               <Section title="Overlay">
+                <label className="mb-2 flex items-center gap-2 text-xs"><span className="w-20 text-muted">fusion</span>
+                  <select className="field !py-0.5" value={clip.blend ?? "normal"} onChange={(e) => mut((c) => { c.blend = e.target.value; })}>{["normal", "add"].map((b) => <option key={b}>{b}</option>)}</select></label>
                 <EffectPicker kind="overlay" disabled={disabled} placeholder={clip.effect} onPick={(id) => mut((c) => { c.effect = id; c.params = {}; })} />
                 {registry.get(clip.effect) && <div className="mt-2"><ParamFields def={registry.get(clip.effect)!} values={clip.params} local={local} onSet={(k, v) => setParam("params", 0, k, v)} /></div>}
               </Section>
             )}
 
-            {track!.kind !== "audio" && track!.kind !== "adjustment" && track!.kind !== "caption" && (
+            {track!.kind !== "audio" && track!.kind !== "adjustment" && track!.kind !== "overlay" && (
+              <>
               <Section title="Position et forme">
                 <div className="space-y-1.5">
                   <NumField label="x" value={clip.transform?.pos?.x} def={0.5} min={-0.5} max={1.5} local={local} onChange={(n) => mut((c) => { c.transform = { ...(c.transform ?? {}), pos: { x: n, y: c.transform?.pos?.y ?? 0.5 } }; })} />
@@ -140,9 +151,19 @@ export default function Inspector() {
                 <label className="mt-1.5 flex items-center gap-2 text-xs"><span className="w-20 text-muted">animation</span>
                   <select className="field !py-0.5" value={clip.motion?.preset ?? ""} onChange={(e) => mut((c) => { c.motion = e.target.value ? { preset: e.target.value } : undefined; })}><option value="">aucune</option>{activeEffects(disabled, "motion_preset").map((e) => <option key={e.id} value={e.id}>{e.id}</option>)}</select></label>
               </Section>
+              </>
+            )}
+            {track!.kind === "audio" && (
+              <Section title="Audio">
+                <NumField label="volume" value={clip.gain} def={1} min={0} max={2} local={local} onChange={(n) => mut((c) => { c.gain = n; })} />
+                <div className="mt-2 flex gap-3 text-xs">
+                  <label className="flex items-center gap-1">fondu entrée (ms)<input type="number" min={0} step={50} className="field !w-20 !py-0.5 font-mono" value={clip.fade?.[0] ?? 0} onChange={(e) => mut((c) => { c.fade = [Math.max(0, +e.target.value), c.fade?.[1] ?? 0]; })} /></label>
+                  <label className="flex items-center gap-1">sortie<input type="number" min={0} step={50} className="field !w-20 !py-0.5 font-mono" value={clip.fade?.[1] ?? 0} onChange={(e) => mut((c) => { c.fade = [c.fade?.[0] ?? 0, Math.max(0, +e.target.value)]; })} /></label>
+                </div>
+              </Section>
             )}
 
-            {(track!.kind === "video" || track!.kind === "adjustment" || track!.kind === "text" || track!.kind === "overlay" || track!.kind === "shape") && (
+            {(track!.kind === "video" || track!.kind === "adjustment" || track!.kind === "text" || track!.kind === "caption") && (
               <Section title="Effets d'image">
                 {(clip.fx ?? []).map((f: any, i: number) => (
                   <div key={i} className="mb-3 rounded-lg border border-line p-2">
@@ -153,7 +174,7 @@ export default function Inspector() {
                 <EffectPicker kind="fx" disabled={disabled} placeholder="+ Ajouter un effet" onPick={(id) => mut((c) => { c.fx = [...(c.fx ?? []), { id }]; }, "Ajouter un effet")} />
               </Section>
             )}
-            {(track!.kind === "video" || track!.kind === "text" || track!.kind === "overlay") && (
+            {(track!.kind === "video" || track!.kind === "text" || track!.kind === "caption") && (
               <Section title="Déformation (mesh)">
                 {clip.mesh ? (
                   <>

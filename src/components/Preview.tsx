@@ -19,17 +19,20 @@ const layoutOf = (d: Composition) => { let l = layouts.get(d); if (!l) { l = lay
 
 export const fmt = (ms: number) => { const s = Math.max(0, ms) / 1000; return `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}.${String(Math.floor((s * 100) % 100)).padStart(2, "0")}`; };
 
-function Stage({ onMissing }: { onMissing: (id: string) => void }) {
+interface Callbacks { onMissing: (id: string) => void; onProblem: (id: string, msg: string) => void }
+
+/** `cb` est une ref : changer de fonction ne doit JAMAIS recréer le Compositor ni la source vidéo (sinon écran noir en lecture). */
+function Stage({ cb }: { cb: React.MutableRefObject<Callbacks> }) {
   const gl = useThree((s) => s.gl);
   const projectId = useEditor((s) => s.projectId);
   const comp = useRef<Compositor | null>(null), src = useRef<PreviewSource | null>(null);
   useEffect(() => {
     const c = useEditor.getState().doc.canvas;
     comp.current = new Compositor(gl, PREVIEW_W, Math.round((PREVIEW_W * c.h) / c.w));
-    src.current = new PreviewSource(projectId, () => useEditor.getState().doc, onMissing);
+    src.current = new PreviewSource(projectId, () => useEditor.getState().doc, (id) => cb.current.onMissing(id), (id, m) => cb.current.onProblem(id, m));
     void ensureFonts(useEditor.getState().doc);
     return () => { src.current?.dispose(); comp.current?.dispose(); comp.current = null; src.current = null; };
-  }, [gl, projectId, onMissing]);
+  }, [gl, projectId, cb]);
 
   // Priorité 1 : désactive le rendu automatique de R3F (on dessine nous-mêmes)
   useFrame((_, dt) => {
@@ -52,7 +55,8 @@ function Stage({ onMissing }: { onMissing: (id: string) => void }) {
   return null;
 }
 
-export default function Preview({ onMissing }: { onMissing: (assetId: string) => void }) {
+export default function Preview({ onMissing, onProblem }: Callbacks) {
+  const cb = useRef<Callbacks>({ onMissing, onProblem }); cb.current = { onMissing, onProblem };
   const doc = useEditor((s) => s.doc), t = useEditor((s) => s.t), playing = useEditor((s) => s.playing), compare = useEditor((s) => s.compare);
   const { setT, setPlaying, setCompare } = useEditor.getState();
   const active = compare.on ? ((compare.side === "a" ? compare.a : compare.b) ?? doc) : doc;
@@ -63,7 +67,7 @@ export default function Preview({ onMissing }: { onMissing: (assetId: string) =>
       <div className="relative flex min-h-0 w-full flex-1 items-center justify-center">
         <div className="relative max-h-full overflow-hidden rounded-xl border border-line bg-black shadow-2xl" style={{ aspectRatio: `${doc.canvas.w} / ${doc.canvas.h}`, height: "100%", maxWidth: "100%" }}>
           <Canvas dpr={1} frameloop="always" gl={{ antialias: false, alpha: false, powerPreference: "high-performance", preserveDrawingBuffer: true }} style={{ width: "100%", height: "100%" }}>
-            <Stage onMissing={onMissing} />
+            <Stage cb={cb} />
           </Canvas>
           {dur === 0 && <div className="absolute inset-0 grid place-items-center p-6 text-center"><p className="font-display text-3xl text-ink/90">Votre film commence ici</p></div>}
           {compare.on && <span className="chip absolute left-2 top-2 bg-black/70 text-ink">{compare.side === "a" ? compare.labelA : compare.labelB}</span>}

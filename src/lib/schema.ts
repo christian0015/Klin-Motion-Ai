@@ -63,8 +63,8 @@ export const AssetS = z.discriminatedUnion("type", [
     remote: z.string().max(300).optional(), proxy: z.string().max(300).optional(),
     words: z.array(WordS).max(20000).optional(),
   }),
-  z.strictObject({ type: z.literal("audio"), name: z.string().max(200).optional(), remote: z.string().max(300).optional(), dur: ms, desc: z.string().max(500).optional(), fp: z.string().max(80).optional(), words: z.array(WordS).max(20000).optional() }),
-  z.strictObject({ type: z.literal("image"), remote: z.string().max(300).optional(), w: z.number().int().positive(), h: z.number().int().positive(), fp: z.string().max(80).optional() }),
+  z.strictObject({ type: z.literal("audio"), name: z.string().max(200).optional(), remote: z.string().max(300).optional(), dur: ms, desc: z.string().max(500).optional(), fp: z.string().max(80).optional(), bytes: z.number().nonnegative().optional(), words: z.array(WordS).max(20000).optional() }),
+  z.strictObject({ type: z.literal("image"), name: z.string().max(200).optional(), remote: z.string().max(300).optional(), w: z.number().int().positive(), h: z.number().int().positive(), fp: z.string().max(80).optional(), bytes: z.number().nonnegative().optional() }),
   z.strictObject({ type: z.enum(["svg", "lottie", "model3d"]), remote: z.string().max(300).optional() }),
   z.strictObject({
     type: z.literal("generated"), kind: z.enum(["image", "video"]), prompt: z.string().max(1000),
