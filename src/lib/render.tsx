@@ -13,7 +13,7 @@ import {
   buildFrameState, evalCol, evalNum, layoutDoc, resolveTransform, srcToTimeline, wordsOf,
   type FrameState, type Layer, type Layout,
 } from "./engine";
-import { coerceParams, paramSpecs, type AudioClip, type CaptionClip, type Composition, type EffectDef, type FxRef, type TextClip, type VideoClip, DEFAULTS, type Ms } from "./schema";
+import { coerceParams, constParams, paramSpecs, type AudioClip, type CaptionClip, type Composition, type EffectDef, type FxRef, type TextClip, type VideoClip, DEFAULTS, type Ms } from "./schema";
 import { getEffect } from "@/effects";
 import { getFile } from "./media";
 
@@ -34,6 +34,10 @@ export class PreviewSource implements FrameSource {
   private imgs = new Map<string, { tex: THREE.Texture; w: number; h: number }>();   // assetId → texture d'image fixe
   private imgLoading = new Set<string>();
   private clipAsset = new Map<string, string>();                                      // clipId → assetId (pour texture())
+  private actx: AudioContext | null = null;                                       // contexte Web Audio (créé seulement si un effet audio est utilisé)
+  private srcNodes = new WeakMap<HTMLMediaElement, MediaElementAudioSourceNode>();
+  private chains = new Map<string, { sig: string; nodes: AudioNode[] }>();
+  private building = new Set<string>();
   private failed = new Map<string, number>();   // assetId → date de l'échec : on ne réessaie qu'après 2,5 s
   constructor(private projectId: string, private getDoc: () => Composition, private onMissing?: (assetId: string) => void, private onProblem?: (assetId: string, msg: string) => void) {}
 
@@ -68,15 +72,48 @@ export class PreviewSource implements FrameSource {
     img.onerror = () => { this.imgLoading.delete(assetId); this.failed.set(assetId, Date.now()); this.onProblem?.(assetId, "Image illisible par ce navigateur (formats : PNG, JPEG, WebP, GIF, AVIF)."); };
     img.src = url;
   }
+  /** Fait passer l'audio d'un élément par la chaîne d'effets audio du clip ; reconstruite seulement quand la liste d'effets change. */
+  private routeAudio(key: string, el: HTMLMediaElement, afx: FxRef[] | undefined, durMs: number) {
+    const cur = this.chains.get(key);
+    if (!afx?.length && !cur) return;                                              // jamais routé, pas d'effet : sortie normale de l'élément
+    const sig = JSON.stringify(afx ?? []);
+    if (cur?.sig === sig || this.building.has(key)) return;
+    this.building.add(key);
+    void (async () => {
+      let ctx: AudioContext | undefined, src: MediaElementAudioSourceNode | undefined;
+      try {
+        ctx = (this.actx ??= new AudioContext()); if (ctx.state === "suspended") await ctx.resume().catch(() => {});
+        src = this.srcNodes.get(el); if (!src) { src = ctx.createMediaElementSource(el); this.srcNodes.set(el, src); }
+        for (const n of cur?.nodes ?? []) { try { n.disconnect(); } catch { /* déjà détaché */ } }
+        src.disconnect();
+        const nodes: AudioNode[] = []; let last: AudioNode = src;
+        for (const f of afx ?? []) {
+          const def = getEffect(f.id); if (!def?.audio) continue;
+          await def.audio.setup?.(ctx);
+          const n = def.audio.build({ ctx, params: constParams(def, f.params), dur: durMs / 1000 });
+          last.connect(n.input); nodes.push(n.input, n.output); last = n.output;
+        }
+        last.connect(ctx.destination); this.chains.set(key, { sig, nodes });
+      } catch {
+        // Filet : si un effet échoue (navigateur sans AudioWorklet…), l'audio est renvoyé tel quel vers la sortie : jamais de silence,
+        // et la signature est mémorisée pour ne pas retenter à chaque image.
+        try { if (src && ctx) { src.disconnect(); src.connect(ctx.destination); } } catch { /* rien de plus à faire */ }
+        this.chains.set(key, { sig, nodes: [] });
+      }
+      finally { this.building.delete(key); }
+    })();
+  }
   prepare(state: FrameState) { void state; }
   /** Appelé à chaque image par le Preview : aligne lecture/pause/position/volume sur l'horloge. */
   sync(state: FrameState, layout: Layout, playing: boolean, doc: Composition) {
+    if (playing && this.actx?.state === "suspended") void this.actx.resume().catch(() => {});   // un contexte suspendu = son capté mais muet
     const live = new Set<string>();
     for (const l of state.layers) {
       if (l.p.kind !== "video") continue;
       const c = l.p.clip as VideoClip; live.add(l.p.id); this.clipAsset.set(l.p.id, c.asset);
       if (doc.assets[c.asset]?.type === "image") { this.ensureImage(c.asset); continue; }
       const e = this.el(l.p.id, c.asset); if (!e) continue;
+      this.routeAudio(l.p.id, e.el, c.afx, l.p.dur);
       const want = (l.srcMs ?? 0) / 1000, track = doc.tracks[l.p.trackIdx];
       e.el.muted = !!track?.muted || !(doc.assets[c.asset] as any)?.hasAudio;
       e.el.volume = Math.min(1, Math.max(0, evalNum(c.volume, l.local, 1)));
@@ -96,6 +133,7 @@ export class PreviewSource implements FrameSource {
         if (url) { a = new Audio(url); this.sfx.set(p.id, a); } else if (!c.asset.startsWith("sfx:")) void this.urlFor(c.asset);
       }
       if (!a) continue;
+      this.routeAudio(p.id, a, c.afx, p.dur);
       a.volume = Math.min(1, Math.max(0, evalNum(c.gain, state.t - p.at, 1))); a.muted = !!doc.tracks[p.trackIdx]?.muted;
       if (active && playing) { if (a.paused) { a.currentTime = (state.t - p.at + (c.src?.[0] ?? 0)) / 1000; void a.play().catch(() => {}); } } else if (!a.paused) a.pause();
     }
@@ -109,7 +147,7 @@ export class PreviewSource implements FrameSource {
     return { tex: e.tex, w: e.el.videoWidth, h: e.el.videoHeight };
   }
   pauseAll() { for (const e of this.els.values()) e.el.pause(); for (const a of this.sfx.values()) a.pause(); }
-  dispose() { this.pauseAll(); for (const e of this.els.values()) { e.tex?.dispose(); e.el.removeAttribute("src"); e.el.load(); } this.els.clear(); for (const i of this.imgs.values()) i.tex.dispose(); this.imgs.clear(); for (const u of this.urls.values()) URL.revokeObjectURL(u); this.urls.clear(); }
+  dispose() { this.pauseAll(); for (const e of this.els.values()) { e.tex?.dispose(); e.el.removeAttribute("src"); e.el.load(); } this.els.clear(); for (const i of this.imgs.values()) i.tex.dispose(); this.imgs.clear(); void this.actx?.close(); this.actx = null; for (const u of this.urls.values()) URL.revokeObjectURL(u); this.urls.clear(); }
 }
 
 /** Export : décodage exact à l'image (WebCodecs via mediabunny). */
@@ -408,11 +446,21 @@ export async function ensureFonts(doc: Composition) {
 export async function mixAudio(doc: Composition, layout: Layout, projectId: string, sr = 48000): Promise<AudioBuffer | null> {
   const len = Math.ceil((layout.duration / 1000) * sr); if (len < 1) return null;
   const ctx = new OfflineAudioContext(2, len, sr); let any = false;
-  const place = (buf: AudioBuffer, at: number, offset: number, dur: number, rate: number, gain: number, fade?: [number, number]) => {
-    const n = ctx.createBufferSource(), g = ctx.createGain(); n.buffer = buf; n.playbackRate.value = rate; n.connect(g).connect(ctx.destination);
-    g.gain.value = gain; if (fade?.[0]) { g.gain.setValueAtTime(0, at); g.gain.linearRampToValueAtTime(gain, at + fade[0] / 1000); }
-    if (fade?.[1]) { g.gain.setValueAtTime(gain, at + dur - fade[1] / 1000); g.gain.linearRampToValueAtTime(0, at + dur); }
-    n.start(at, offset); n.stop(at + dur); any = true;
+  /** Bus d'un clip : volume + fondus, puis chaîne d'effets audio, puis sortie. Tous les morceaux du clip s'y branchent (états des effets continus). */
+  const bus = async (afx: FxRef[] | undefined, atS: number, durS: number, gain: number, fade?: [number, number]) => {
+    const g = ctx.createGain(); g.gain.value = gain;
+    if (fade?.[0]) { g.gain.setValueAtTime(0, atS); g.gain.linearRampToValueAtTime(gain, atS + fade[0] / 1000); }
+    if (fade?.[1]) { g.gain.setValueAtTime(gain, atS + durS - fade[1] / 1000); g.gain.linearRampToValueAtTime(0, atS + durS); }
+    let last: AudioNode = g;
+    for (const f of afx ?? []) {
+      const def = getEffect(f.id); if (!def?.audio) continue;
+      await def.audio.setup?.(ctx);
+      const n = def.audio.build({ ctx, params: constParams(def, f.params), dur: durS }); last.connect(n.input); last = n.output;
+    }
+    last.connect(ctx.destination); return g;
+  };
+  const play = (buf: AudioBuffer, at: number, offset: number, dur: number, rate: number, target: AudioNode) => {
+    const n = ctx.createBufferSource(); n.buffer = buf; n.playbackRate.value = rate; n.connect(target); n.start(at, offset); n.stop(at + dur); any = true;
   };
   for (const p of layout.list) {
     if (!p.ok) continue;
@@ -423,12 +471,12 @@ export async function mixAudio(doc: Composition, layout: Layout, projectId: stri
       const input = new Input({ source: new BlobSource(blob), formats: ALL_FORMATS });
       try {
         const tr = await input.getPrimaryAudioTrack(); if (!tr) continue;
-        const sink = new AudioBufferSink(tr), rate = evalNum(c.speed, 0, 1), vol = evalNum(c.volume, 0, 1);
+        const sink = new AudioBufferSink(tr), rate = evalNum(c.speed, 0, 1), g = await bus(c.afx, p.at / 1000, p.dur / 1000, evalNum(c.volume, 0, 1));
         for await (const wb of sink.buffers(c.src[0] / 1000, c.src[1] / 1000)) {
           const skip = Math.max(0, c.src[0] / 1000 - wb.timestamp);
           const at = (p.at + (Math.max(wb.timestamp, c.src[0] / 1000) * 1000 - c.src[0]) / rate) / 1000;
           const remain = Math.min(wb.duration - skip, c.src[1] / 1000 - Math.max(wb.timestamp, c.src[0] / 1000));
-          if (remain > 0) place(wb.buffer, at, skip, remain / rate, rate, vol);
+          if (remain > 0) play(wb.buffer, at, skip, remain / rate, rate, g);
         }
       } finally { input.dispose(); }
     } else if (p.kind === "audio") {
@@ -436,8 +484,9 @@ export async function mixAudio(doc: Composition, layout: Layout, projectId: stri
       if (c.asset.startsWith("sfx:")) { const u = getEffect(c.asset.slice(4))?.url; if (u) ab = await (await fetch(u)).arrayBuffer(); }
       else { const a: any = doc.assets[c.asset]; const b = a && (await getFile(projectId, c.asset, a)); if (b) ab = await b.arrayBuffer(); }
       if (!ab) continue;
-      const buf = await ctx.decodeAudioData(ab); const off = (c.src?.[0] ?? 0) / 1000;
-      place(buf, p.at / 1000, off, Math.min(p.dur, (buf.duration - off) * 1000) / 1000, 1, evalNum(c.gain, 0, 1), c.fade);
+      const buf = await ctx.decodeAudioData(ab), off = (c.src?.[0] ?? 0) / 1000, durS = Math.min(p.dur, (buf.duration - off) * 1000) / 1000;
+      const g = await bus(c.afx, p.at / 1000, durS, evalNum(c.gain, 0, 1), c.fade);
+      play(buf, p.at / 1000, off, durS, 1, g);
     }
   }
   return any ? await ctx.startRendering() : null;

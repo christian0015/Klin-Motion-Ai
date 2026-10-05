@@ -15,6 +15,7 @@
  */
 import { z } from "zod";
 import type { ComponentType } from "react";
+import { normalizeTimes } from "./normalize";
 
 /* ────────────────────────── Primitives ────────────────────────── */
 export type Ms = number;
@@ -63,8 +64,8 @@ export const AssetS = z.discriminatedUnion("type", [
     remote: z.string().max(300).optional(), proxy: z.string().max(300).optional(),
     words: z.array(WordS).max(20000).optional(),
   }),
-  z.strictObject({ type: z.literal("audio"), name: z.string().max(200).optional(), remote: z.string().max(300).optional(), dur: ms, desc: z.string().max(500).optional(), fp: z.string().max(80).optional(), bytes: z.number().nonnegative().optional(), words: z.array(WordS).max(20000).optional() }),
-  z.strictObject({ type: z.literal("image"), name: z.string().max(200).optional(), remote: z.string().max(300).optional(), w: z.number().int().positive(), h: z.number().int().positive(), fp: z.string().max(80).optional(), bytes: z.number().nonnegative().optional() }),
+  z.strictObject({ type: z.literal("audio"), name: z.string().max(200).optional(), remote: z.string().max(300).optional(), dur: ms, desc: z.string().max(500).optional(), fp: z.string().max(80).optional(), bytes: z.number().nonnegative().optional(), proxy: z.string().max(300).optional(), words: z.array(WordS).max(20000).optional() }),
+  z.strictObject({ type: z.literal("image"), name: z.string().max(200).optional(), desc: z.string().max(500).optional(), remote: z.string().max(300).optional(), proxy: z.string().max(300).optional(), w: z.number().int().positive(), h: z.number().int().positive(), fp: z.string().max(80).optional(), bytes: z.number().nonnegative().optional() }),
   z.strictObject({ type: z.enum(["svg", "lottie", "model3d"]), remote: z.string().max(300).optional() }),
   z.strictObject({
     type: z.literal("generated"), kind: z.enum(["image", "video"]), prompt: z.string().max(1000),
@@ -106,7 +107,7 @@ const visual = {
 const Fill = z.looseObject({ type: z.enum(["color", "gradient", "media"]) });
 
 export const VideoClipS = z.strictObject({
-  ...visual, asset: id, src: z.tuple([ms, ms]), speed: NumS.optional(),
+  ...visual, asset: id, src: z.tuple([ms, ms]), speed: NumS.optional(), afx: z.array(FxRef).max(8).optional(),
   fit: z.enum(["cover", "contain", "fill"]).optional(), volume: NumS.optional(),
 });
 export const AdjustmentClipS = z.strictObject({
@@ -131,7 +132,7 @@ export const ShapeClipS = z.strictObject({
   }),
 });
 export const AudioClipS = z.strictObject({
-  id, asset: z.string().max(80), src: z.tuple([ms, ms]).optional(), at: ms.optional(), anchor: Anchor.optional(),
+  id, asset: z.string().max(80), src: z.tuple([ms, ms]).optional(), at: ms.optional(), anchor: Anchor.optional(), afx: z.array(FxRef).max(8).optional(),
   gain: NumS.optional(), fade: z.tuple([ms, ms]).optional(), dur: ms.optional(),
 });
 
@@ -190,7 +191,17 @@ export const PlanS = z.strictObject({
   storageGB: z.number().min(0), dailyAnalyses: z.number().int().min(0), watermark: z.boolean(),
   maxProxyMinutes: z.number().min(1).max(120), signupCredits: z.number().min(0),
 });
+/** Modèle d'analyse par défaut (vérifié dans la doc Gemini le 4 oct. 2026) ; modifiable dans l'admin. */
+export const DEFAULT_AI_MODEL = "gemini-3.8-flash";
+export const AiConfigS = z.strictObject({
+  model: z.string().min(3).max(80),
+  fallbackModels: z.array(z.string().min(3).max(80)).max(2),   // modèles essayés dans l'ordre si le principal est surchargé
+  maxFallbacks: z.number().int().min(0).max(2),                // 0 = aucun repli ; max 2
+  retryDelayMs: z.number().int().min(0).max(15000),
+});
+export type AiConfig = z.infer<typeof AiConfigS>;
 export const SettingsS = z.strictObject({
+  ai: AiConfigS,
   rates: z.strictObject({ analysisPerMinute: z.number().min(0), generation: z.number().min(0), storagePerGBMonth: z.number().min(0) }),
   tokens: z.strictObject({ usdPerMTokIn: z.number().min(0), usdPerMTokOut: z.number().min(0), usdPerGBMonth: z.number().min(0), usdPerCredit: z.number().min(0) }),
   plans: z.record(z.string().max(20), PlanS),
@@ -200,6 +211,7 @@ export const SettingsS = z.strictObject({
 });
 export type Settings = z.infer<typeof SettingsS>;
 export const DEFAULT_SETTINGS: Settings = {
+  ai: { model: DEFAULT_AI_MODEL, fallbackModels: ["gemini-3.7-flash", "gemini-3.5-flash"], maxFallbacks: 2, retryDelayMs: 2500 },
   rates: { analysisPerMinute: 10, generation: 25, storagePerGBMonth: 5 },
   tokens: { usdPerMTokIn: 0.5, usdPerMTokOut: 3, usdPerGBMonth: 0.015, usdPerCredit: 0.02 },
   plans: {
@@ -218,7 +230,7 @@ export const DEFAULT_SETTINGS: Settings = {
 /* ────────────────────────── Contrat d'effet (section 11.1) ────────────────────────── */
 export type EffectKind =
   | "fx" | "mesh" | "overlay" | "transition" | "caption_style" | "text_style"
-  | "shape_preset" | "motion_preset" | "lut" | "sfx";
+  | "shape_preset" | "motion_preset" | "lut" | "sfx" | "audio_fx";
 export interface EffectProps { texture: unknown; params: Record<string, unknown>; t: Ms; size: { w: number; h: number } }
 export interface DrawArgs {
   g: CanvasRenderingContext2D; w: number; h: number; t: Ms; dur: Ms; text: string;
@@ -226,6 +238,12 @@ export interface DrawArgs {
   reveal?: { by: "letters" | "words" | "lines"; stagger: Ms };
 }
 export interface MotionOut { scale?: number; opacity?: number; dx?: number; dy?: number; rot?: number }
+/** Effet audio = un petit graphe Web Audio, construit une fois par clip (aperçu : AudioContext, export : OfflineAudioContext). */
+export interface AudioFxNodes { input: AudioNode; output: AudioNode }
+export interface AudioFxDef {
+  setup?: (ctx: BaseAudioContext) => Promise<void>;   // optionnel, async : ex. charger un AudioWorklet
+  build: (a: { ctx: BaseAudioContext; params: Record<string, any>; dur: number }) => AudioFxNodes;   // dur = durée du clip en secondes
+}
 export interface EffectDef<P extends z.ZodObject<any> = z.ZodObject<any>> {
   id: string; kind: EffectKind; status: "active" | "deprecated"; describe: string;
   params?: P; cost: "light" | "heavy";
@@ -234,6 +252,7 @@ export interface EffectDef<P extends z.ZodObject<any> = z.ZodObject<any>> {
   draw?: (a: DrawArgs) => void;                       // text_style / caption_style (moteur canvas)
   motion?: (a: { t: Ms; dur: Ms; params: Record<string, any> }) => MotionOut; // motion_preset
   url?: string; duration?: Ms; fonts?: string[];
+  audio?: AudioFxDef;                                 // audio_fx
 }
 export function defineEffect<P extends z.ZodObject<any>>(d: EffectDef<P>): EffectDef<P> {
   return { ...d, params: d.params ?? (z.object({}) as unknown as P) };
@@ -260,6 +279,12 @@ export function paramSpecs(def: EffectDef): ParamSpec[] {
   } catch { specs = []; }
   specCache.set(key, specs);
   return specs;
+}
+/** Paramètres d'un effet AUDIO : valeurs constantes (une animation est ramenée à sa 1re valeur), bornées et complétées. */
+export function constParams(def: EffectDef, raw: Record<string, unknown> | undefined): Record<string, any> {
+  const flat: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(raw ?? {})) flat[k] = v && typeof v === "object" && "kf" in v ? (v as { kf: unknown[][] }).kf[0]?.[1] : v;
+  return coerceParams(def, flat);
 }
 /** Ramène les valeurs dans les bornes (jamais de rejet) ; complète avec les valeurs par défaut. */
 export function coerceParams(def: EffectDef, raw: Record<string, unknown> | undefined): Record<string, any> {
@@ -301,6 +326,7 @@ export function migrate(raw: unknown): Composition {
   r.assets ??= {};
   r.transitions ??= [];
   r.tracks = (r.tracks ?? []).map((t: any) => ({ ...t, clips: t.clips ?? [] }));
+  normalizeTimes(r);
   return CompositionS.parse(r);
 }
 

@@ -18,7 +18,7 @@ const upsertKf = (n: Num | undefined, t: number, v: number): Num => {
   return { kf } as Num;
 };
 
-function NumField({ label, value, def, min, max, step = 0.01, local, onChange }: { label: string; value: Num | undefined; def: number; min: number; max: number; step?: number; local: number; onChange: (n: Num) => void }) {
+function NumField({ label, value, def, min, max, step = 0.01, local, onChange, animatable = true }: { label: string; value: Num | undefined; def: number; min: number; max: number; step?: number; local: number; onChange: (n: Num) => void; animatable?: boolean }) {
   const end = useEditor.getState().endGesture;
   const animated = isKf(value), cur = evalNum(value, local, def);
   return (
@@ -28,13 +28,13 @@ function NumField({ label, value, def, min, max, step = 0.01, local, onChange }:
         onChange={(e) => onChange(animated ? upsertKf(value, local, +e.target.value) : +e.target.value)} onPointerUp={end} onKeyUp={end} />
       <input type="number" min={min} max={max} step={step} value={Number(cur.toFixed(3))} className="field !w-16 !px-1 !py-0.5 text-right font-mono"
         onChange={(e) => { const v = Math.min(max, Math.max(min, +e.target.value)); onChange(animated ? upsertKf(value, local, v) : v); }} onBlur={end} />
-      <button type="button" title={animated ? "Retirer l'animation" : "Animer ce paramètre (image clé à la position du playhead)"} aria-label="Animer"
-        className={`rounded px-1 ${animated ? "text-accent-2" : "text-muted"}`} onClick={() => { onChange(animated ? cur : { kf: [[Math.round(local), cur]] }); end(); }}>◆</button>
+      {animatable && <button type="button" title={animated ? "Retirer l'animation" : "Animer ce paramètre (image clé à la position du playhead)"} aria-label="Animer"
+        className={`rounded px-1 ${animated ? "text-accent-2" : "text-muted"}`} onClick={() => { onChange(animated ? cur : { kf: [[Math.round(local), cur]] }); end(); }}>◆</button>}
     </label>
   );
 }
 
-function ParamFields({ def, values, local, onSet }: { def: EffectDef; values: Record<string, any> | undefined; local: number; onSet: (k: string, v: any) => void }) {
+function ParamFields({ def, values, local, onSet, animatable = true }: { def: EffectDef; values: Record<string, any> | undefined; local: number; onSet: (k: string, v: any) => void; animatable?: boolean }) {
   const end = useEditor.getState().endGesture;
   const specs = paramSpecs(def);
   if (!specs.length) return <p className="text-xs text-muted">Aucun réglage.</p>;
@@ -42,7 +42,7 @@ function ParamFields({ def, values, local, onSet }: { def: EffectDef; values: Re
     <div className="space-y-1.5">
       {specs.map((s) => {
         const v = values?.[s.key];
-        if (s.type === "number") return <NumField key={s.key} label={s.key} value={v} def={s.def} min={s.min} max={s.max} step={(s.max - s.min) > 20 ? 1 : 0.01} local={local} onChange={(n) => onSet(s.key, n)} />;
+        if (s.type === "number") return <NumField key={s.key} label={s.key} value={v} def={s.def} min={s.min} max={s.max} step={(s.max - s.min) > 20 ? 1 : 0.01} local={local} animatable={animatable} onChange={(n) => onSet(s.key, n)} />;
         if (s.type === "color") return <label key={s.key} className="flex items-center gap-2 text-xs"><span className="w-20 text-muted">{s.key}</span><input type="color" value={typeof v === "string" ? v : s.def} onChange={(e) => onSet(s.key, e.target.value)} onBlur={end} /></label>;
         if (s.type === "boolean") return <label key={s.key} className="flex items-center gap-2 text-xs"><span className="w-20 text-muted">{s.key}</span><input type="checkbox" checked={typeof v === "boolean" ? v : !!s.def} onChange={(e) => { onSet(s.key, e.target.checked); end(); }} /></label>;
         if (s.type === "enum") return <label key={s.key} className="flex items-center gap-2 text-xs"><span className="w-20 text-muted">{s.key}</span><select className="field !py-0.5" value={v ?? s.def} onChange={(e) => { onSet(s.key, e.target.value); end(); }}>{s.options!.map((o) => <option key={o}>{o}</option>)}</select></label>;
@@ -111,6 +111,18 @@ export default function Inspector() {
                 )}
                 <label className="mt-1.5 flex items-center gap-2 text-xs"><span className="w-20 text-muted">cadrage</span>
                   <select className="field !py-0.5" value={clip.fit ?? "cover"} onChange={(e) => mut((c) => { c.fit = e.target.value; })}><option value="cover">remplir</option><option value="contain">contenir</option><option value="fill">étirer</option></select></label>
+              </Section>
+            )}
+            {(track!.kind === "audio" || (track!.kind === "video" && doc.assets[clip.asset]?.type === "video" && (doc.assets[clip.asset] as { hasAudio?: boolean }).hasAudio)) && (
+              <Section title="Effets audio">
+                {(clip.afx ?? []).map((f: any, i: number) => (
+                  <div key={i} className="mb-3 rounded-lg border border-line p-2">
+                    <div className="mb-1.5 flex items-center justify-between text-xs font-medium">{f.id}<button className="text-muted hover:text-bad" onClick={() => mut((c) => { c.afx.splice(i, 1); if (!c.afx.length) delete c.afx; }, "Retirer l'effet audio")}>Retirer</button></div>
+                    {registry.get(f.id) ? <ParamFields def={registry.get(f.id)!} values={f.params} local={local} animatable={false} onSet={(k, v) => mut((c) => { c.afx[i].params = { ...(c.afx[i].params ?? {}), [k]: v }; })} /> : <p className="text-xs text-warn">Effet audio inconnu ou désactivé : ignoré.</p>}
+                  </div>
+                ))}
+                <EffectPicker kind="audio_fx" disabled={disabled} placeholder="+ Ajouter un effet audio" onPick={(id) => mut((c) => { c.afx = [...(c.afx ?? []), { id }]; }, "Ajouter un effet audio")} />
+                <p className="mt-2 text-[11px] text-muted">Réglages fixes sur toute la durée du clip. Les effets s'entendent en lecture et à l'export.</p>
               </Section>
             )}
             {track!.kind === "text" && (

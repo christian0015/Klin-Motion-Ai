@@ -6,7 +6,7 @@
  * Ne contient PAS : état global (store.ts), rendu (render.tsx), appels serveur à Gemini.
  * Jamais d'ArrayBuffer complet pour un rush : on garde des objets File (adossés au disque) et on copie par flux dans OPFS.
  */
-import { ALL_FORMATS, BlobSource, BufferTarget, Conversion, Input, Mp4OutputFormat, Output, WebMOutputFormat, canEncodeAudio, canEncodeVideo } from "mediabunny";
+import { ALL_FORMATS, AudioBufferSink, BlobSource, BufferTarget, Conversion, Input, Mp4OutputFormat, Output, WavOutputFormat, WebMOutputFormat, canEncodeAudio, canEncodeVideo } from "mediabunny";
 import type { VideoAsset } from "./schema";
 
 /* ───── API ───── */
@@ -90,6 +90,26 @@ export async function probe(file: File): Promise<Probed> {
   } finally { input.dispose(); }
 }
 
+/* ───── Forme d'onde : crêtes par tranche de 50 ms, calculées en flux (jamais le fichier entier en mémoire) ───── */
+const peaksCache = new Map<string, Float32Array>();
+export async function audioPeaks(blob: Blob, key: string): Promise<Float32Array> {
+  const hit = peaksCache.get(key); if (hit) return hit;
+  const input = new Input({ source: new BlobSource(blob), formats: ALL_FORMATS });
+  try {
+    const track = await input.getPrimaryAudioTrack(); if (!track) throw new Error("Aucune piste audio.");
+    const dur = Math.max(0.05, await input.computeDuration()), buckets = Math.min(4000, Math.max(60, Math.ceil(dur * 20)));
+    const peaks = new Float32Array(buckets), sink = new AudioBufferSink(track);
+    for await (const wb of sink.buffers()) {
+      const ch = wb.buffer.getChannelData(0), sr = wb.buffer.sampleRate, step = Math.max(1, Math.floor(sr / 800));
+      for (let i = 0; i < ch.length; i += step) {
+        const b = Math.min(buckets - 1, Math.floor(((wb.timestamp + i / sr) / dur) * buckets)), v = Math.abs(ch[i]);
+        if (v > peaks[b]) peaks[b] = v;
+      }
+    }
+    peaksCache.set(key, peaks); return peaks;
+  } finally { input.dispose(); }
+}
+
 /* ───── Audio (musique) : durée + empreinte ───── */
 export async function probeAudio(file: File): Promise<{ dur: number; fp: string }> {
   const fp = await fingerprint(file);
@@ -108,6 +128,27 @@ export async function probeImage(file: File): Promise<{ w: number; h: number; fp
   const r = { w: bmp.width, h: bmp.height, fp }; bmp.close();
   if (r.w > 16384 || r.h > 16384) throw new Error(`« ${file.name} » : image trop grande (16384 px maximum).`);
   return r;
+}
+
+/** Image réduite pour l'IA (JPEG, grand côté ≤ maxSide) : l'original reste intact. */
+export async function makeImageProxy(file: Blob, maxSide: number): Promise<Blob> {
+  const bmp = await createImageBitmap(file), k = Math.min(1, maxSide / Math.max(bmp.width, bmp.height));
+  const w = Math.max(1, Math.round(bmp.width * k)), h = Math.max(1, Math.round(bmp.height * k));
+  const cv = document.createElement("canvas"); cv.width = w; cv.height = h;
+  const g = cv.getContext("2d")!; g.fillStyle = "#ffffff"; g.fillRect(0, 0, w, h); g.drawImage(bmp, 0, 0, w, h); bmp.close();   // fond blanc : le JPEG n'a pas d'alpha
+  return await new Promise<Blob>((res, rej) => cv.toBlob((b) => (b ? res(b) : rej(new Error("Compression de l'image impossible."))), "image/jpeg", 0.82));
+}
+/** Son réduit pour l'IA : WAV mono 16 kHz (≈ 2 Mo par minute), lisible partout et sans WebCodecs. */
+export async function makeAudioProxy(file: Blob, onProgress?: (p: number) => void): Promise<Blob> {
+  const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS });
+  try {
+    const output = new Output({ format: new WavOutputFormat(), target: new BufferTarget() });
+    const conv = await Conversion.init({ input, output, video: { discard: true }, audio: { numberOfChannels: 1, sampleRate: 16_000, codec: "pcm-s16" } });
+    if (!conv.isValid) throw new Error("Impossible de préparer ce son pour l'analyse (format non lisible).");
+    conv.onProgress = (p) => onProgress?.(p);
+    await conv.execute();
+    return new Blob([output.target.buffer!], { type: "audio/wav" });
+  } finally { input.dispose(); }
 }
 
 /* ───── Proxy d'analyse (client) : l'original reste intact ───── */

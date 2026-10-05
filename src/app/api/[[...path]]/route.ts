@@ -42,15 +42,15 @@ import {
   nativeClient, saveSettings,
 } from "@/lib/db";
 import { estimateAnalysis, getProvider, grant, planOf, recordStorage, refund, reserve, settle, storageOk } from "@/lib/billing";
-import { ANALYSIS, callGemini, catalogTokens, fallbackDoc, mergeAi } from "@/lib/gemini";
+import { ANALYSIS, callGemini, catalogTokens, fallbackDoc, friendlyError, mergeAi, type MediaInput } from "@/lib/gemini";
 import { BriefS, CompositionS, EXAMPLE_DOC, migrate, type Composition, ProjectCreateS, ProjectPatchS, SettingsS, DOC_LIMITS, emptyComposition } from "@/lib/schema";
 import { EFFECTS } from "@/effects";
 
 export const maxDuration = 300;
 export const runtime = "nodejs";
 
-/** Rushs réellement placés sur une piste vidéo (les autres ne sont ni analysés ni facturés). */
-const usedAssets = (doc: Composition) => new Set(doc.tracks.flatMap((t) => (t.kind === "video" ? t.clips.map((c) => c.asset) : [])));
+/** Médias réellement placés sur la timeline : vidéos et images (pistes vidéo), sons (pistes audio). Les autres ne sont ni analysés ni facturés. */
+const usedAssets = (doc: Composition) => new Set(doc.tracks.flatMap((t) => (t.kind === "video" || t.kind === "audio" ? (t.clips as { asset: string }[]).map((c) => c.asset) : [])));
 
 /** Valeurs de départ des limites (section 9.6). Format : [fenêtre en secondes, maximum]. */
 const LIMITS = {
@@ -132,19 +132,21 @@ async function runJob(jobId: string) {
     const project = await Project.findOne({ _id: job.projectId, ownerId: job.userId }).lean(); if (!project) throw new Error("Projet introuvable");
     const doc = migrate(project.doc);
     const s = await getSettings();
-    const rushes = [];
+    const media: MediaInput[] = [], used = usedAssets(doc);
     for (const [id, a] of Object.entries(doc.assets)) {
-      if (a.type !== "video" || !a.proxy || !usedAssets(doc).has(id)) continue;
+      if ((a.type !== "video" && a.type !== "image" && a.type !== "audio") || !a.proxy || !used.has(id)) continue;
       if (!a.proxy.startsWith(`u/${uid}/`)) throw new Error("Clé de proxy invalide");
       const { aws, base } = r2cfg();
       const r = await aws.fetch(`${base}/${enc(a.proxy)}`);
       if (!r.ok) throw new Error(`Proxy introuvable pour ${id}`);
-      rushes.push({ id, desc: a.desc, w: a.w, h: a.h, dur: a.dur, fps: a.fps, rot: a.rot, hasAudio: a.hasAudio, proxy: await r.blob() });
+      const proxy = await r.blob();
+      media.push(a.type === "video" ? { id, type: "video", name: a.name, desc: a.desc, w: a.w, h: a.h, dur: a.dur, fps: a.fps, rot: a.rot, hasAudio: a.hasAudio, proxy }
+        : a.type === "image" ? { id, type: "image", name: a.name, desc: a.desc, w: a.w, h: a.h, proxy } : { id, type: "audio", name: a.name, desc: a.desc, dur: a.dur, proxy });
     }
-    if (!rushes.length) throw new Error("Aucun proxy envoyé : relancez l'analyse depuis l'éditeur.");
+    if (!media.some((m) => m.type === "video")) throw new Error("Aucun proxy vidéo envoyé : relancez l'analyse depuis l'éditeur.");
     let result;
     try {
-      result = await callGemini({ rushes, brief: BriefS.parse(project.brief), disabled: s.disabledEffects, base: doc }, (p, m) => setJob(jobId, { progress: p, message: m }));
+      result = await callGemini({ media, brief: BriefS.parse(project.brief), disabled: s.disabledEffects, base: doc, ai: s.ai }, (p, m) => setJob(jobId, { progress: p, message: m }));
     } catch (e: any) {
       if (e?.raw !== undefined) {
         // Réponse invalide après nouvelle tentative → repli séquentiel + remboursement (tokens journalisés)
@@ -158,13 +160,13 @@ async function runJob(jobId: string) {
     }
     await setJob(jobId, { progress: 0.9, message: "Validation du montage…" });
     const merged = mergeAi(doc, result.ai, s.disabledEffects);
-    const v = await Version.create({ projectId: project._id, ownerId: job.userId, kind: "ai", label: "Montage IA", doc: merged, meta: { raw: result.raw.slice(0, 200_000), model: result.model, tokensIn: result.tokensIn, tokensOut: result.tokensOut, latencyMs: result.latencyMs, attempts: result.attempts, catalogTokens: catalogTokens(s.disabledEffects) } });
+    const v = await Version.create({ projectId: project._id, ownerId: job.userId, kind: "ai", label: "Montage IA", doc: merged, meta: { raw: result.raw.slice(0, 200_000), fallbackLog: result.log, audioLimited: result.audioLimited, model: result.model, tokensIn: result.tokensIn, tokensOut: result.tokensOut, latencyMs: result.latencyMs, attempts: result.attempts, catalogTokens: catalogTokens(s.disabledEffects) } });
     const { costUsd } = await settle(uid, job.reserved, jobId, result.tokensIn, result.tokensOut);
     await setJob(jobId, { status: "done", progress: 1, message: "Montage prêt.", versionId: v._id, costUsd });
     await logEvent(uid, "analysis_done", { projectId: String(project._id), tokens: result.tokensIn + result.tokensOut });
   } catch (e: any) {
     await refund(uid, job.reserved, "analysis_refund", jobId).catch(() => {});
-    await setJob(jobId, { status: "failed", progress: 1, error: String(e?.message ?? e).slice(0, 500), message: "L'analyse a échoué : crédits remboursés." });
+    await setJob(jobId, { status: "failed", progress: 1, error: friendlyError(e), message: "L'analyse a échoué : crédits remboursés." });
   }
 }
 
@@ -181,7 +183,7 @@ add("GET", "me", "user", async ({ user }) => {
   ]);
   const plan = planOf(u, s);
   return { id: user.id, name: u.name, email: u.email, image: u.image, plan: u.plan ?? "free", role: u.role ?? "user", credits: u.credits ?? 0, storageBytes: u.storageBytes ?? 0,
-    prefs: u.prefs ?? {}, analysis: { proxyShortSide: ANALYSIS.proxyShortSide, proxyFps: ANALYSIS.proxyFps }, disabledEffects: s.disabledEffects, limits: { ...plan, analysesToday: today }, packs: s.packs, rates: s.rates, ledger: ledger.map(toId) };
+    prefs: u.prefs ?? {}, analysis: { proxyShortSide: ANALYSIS.proxyShortSide, proxyFps: ANALYSIS.proxyFps, imageProxySide: ANALYSIS.imageProxySide }, disabledEffects: s.disabledEffects, limits: { ...plan, analysesToday: today }, packs: s.packs, rates: s.rates, ledger: ledger.map(toId) };
 });
 add("PATCH", "me", "user", async ({ user, body }) => {
   const b = parse(z.strictObject({ name: z.string().min(1).max(80).optional(), prefs: z.strictObject({ platform: BriefS.shape.platform.optional(), lang: z.string().max(12).optional() }).optional() }), body);
@@ -336,17 +338,18 @@ add("POST", "upload/sign", "user", async ({ user, body }) => {
 async function analysisBase(userId: string, projectId: string) {
   const pr = await own(userId, projectId); const doc = migrate(pr.doc);
   const used = usedAssets(doc);
-  const vids = Object.entries(doc.assets).filter(([id, a]) => a.type === "video" && a.proxy && used.has(id)).map(([, a]) => a) as any[];
+  const ready = Object.entries(doc.assets).filter(([id, a]) => (a.type === "video" || a.type === "image" || a.type === "audio") && a.proxy && used.has(id)).map(([, a]) => a) as any[];
+  const vids = ready.filter((a) => a.type === "video");
   if (!vids.length) throw new HttpError(400, "Aucun rush de la timeline n'est prêt pour l'analyse : ajoutez une vidéo à la timeline.");
   const s = await getSettings(); const u = await User.findById(userId).lean(); const plan = planOf(u, s);
-  const total = vids.reduce((a, v) => a + v.dur, 0);
-  if (total > plan.maxProxyMinutes * 60_000) throw new HttpError(413, `Durée maximale d'analyse : ${plan.maxProxyMinutes} min pour votre offre.`);
-  return { s, u, plan, est: estimateAnalysis(total, s) };
+  const total = vids.reduce((a, v) => a + v.dur, 0), audioMs = ready.filter((a) => a.type === "audio").reduce((a, v) => a + v.dur, 0), images = ready.filter((a) => a.type === "image").length;
+  if (total + audioMs > plan.maxProxyMinutes * 60_000) throw new HttpError(413, `Durée maximale d'analyse : ${plan.maxProxyMinutes} min pour votre offre.`);
+  return { s, u, plan, est: estimateAnalysis(total, s, { images, audioMs }) };
 }
 add("POST", "analyze/estimate", "user", async ({ user, body }) => {
   const b = parse(z.strictObject({ projectId: z.string() }), body);
-  const { est, u } = await analysisBase(user.id, b.projectId);
-  return { ...est, balance: u.credits ?? 0, model: ANALYSIS.model, samplingFps: ANALYSIS.samplingFps };
+  const { est, u, s } = await analysisBase(user.id, b.projectId);
+  return { ...est, balance: u.credits ?? 0, model: s.ai.model, samplingFps: ANALYSIS.samplingFps };
 });
 add("POST", "analyze", "user", async ({ user, body }) => {
   const b = parse(z.strictObject({ projectId: z.string() }), body);
@@ -402,7 +405,7 @@ add("GET", "admin/stats", "admin", async () => {
   const costUsd = cost.reduce((a: number, r: any) => a + r.usd, 0);
   return {
     users, creditsOutstanding: credits[0]?.c ?? 0, storageBytes: credits[0]?.st ?? 0, revenue: rev, revenueUsd, costUsd, marginUsd: revenueUsd - costUsd, costByAction: cost, jobs: jobsBy,
-    health: { env: Object.fromEntries(ENV_KEYS.map((k) => [k, !!process.env[k]])), lastAiCall: lastAi?.updatedAt ?? null, errors: errors.map(toId), model: ANALYSIS.model },
+    health: { env: Object.fromEntries(ENV_KEYS.map((k) => [k, !!process.env[k]])), lastAiCall: lastAi?.updatedAt ?? null, errors: errors.map(toId), model: s.ai.model },
     settings: s, catalogTokens: catalogTokens(s.disabledEffects),
     effects: EFFECTS.map((e) => ({ id: e.id, kind: e.kind, status: e.status, cost: e.cost, describe: e.describe, enabled: !s.disabledEffects.includes(e.id) })),
   };

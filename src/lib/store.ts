@@ -10,6 +10,7 @@ import { applyPatches, enablePatches, produceWithPatches, type Draft, type Patch
 import { nanoid } from "nanoid";
 import { api, ApiError, probeAudio, probeImage, remember, uploadBlob } from "./media";
 import { removeClip, splitClipAt, layoutDoc, timelineLenFor, wordsOf } from "./engine";
+import { normalizeTimes } from "./normalize";
 import type { Brief, Composition, EffectKind, Track, VideoClip, Word } from "./schema";
 import { activeEffects, registry } from "@/effects";
 
@@ -66,7 +67,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
 
   apply: (label, recipe, gesture = false) => {
     const s = get();
-    const [doc, patches, inverse] = produceWithPatches(s.doc, recipe);
+    const [doc, patches, inverse] = produceWithPatches(s.doc, (d) => { recipe(d); normalizeTimes(d); });
     if (!patches.length) return;
     let past = s.past;
     if (gesture && s.gestureOpen && past.length) {
@@ -76,7 +77,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
     set({ doc, past, future: [], gestureOpen: gesture, save: "dirty" });
   },
   /** Modification qui ne passe pas dans l'historique (métadonnées techniques : remote, proxy, mots corrigés par l'app). */
-  silent: (recipe) => { const [doc, patches] = produceWithPatches(get().doc, recipe); if (patches.length) set({ doc, save: "dirty" }); },
+  silent: (recipe) => { const [doc, patches] = produceWithPatches(get().doc, (d) => { recipe(d); normalizeTimes(d); }); if (patches.length) set({ doc, save: "dirty" }); },
   endGesture: () => set({ gestureOpen: false }),
   undo: () => {
     const { past, doc, future } = get(); const e = past[past.length - 1]; if (!e) return;

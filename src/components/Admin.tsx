@@ -88,10 +88,20 @@ function Users({ plans, flash, setErr }: { plans: string[]; flash: (m: string) =
 function Pricing({ settings, flash, setErr, reload }: { settings: Settings; flash: (m: string) => void; setErr: (m: string) => void; reload: () => void }) {
   const [s, setS] = useState<Settings>(settings);
   const num = (v: string) => (v === "" ? 0 : Number(v));
-  const save = async () => { try { await api("admin/settings", "PATCH", { rates: s.rates, tokens: s.tokens, plans: s.plans, packs: s.packs, inactivityDays: s.inactivityDays }); flash("Tarifs enregistrés (actifs immédiatement)."); reload(); } catch (e) { setErr((e as Error).message); } };
+  const save = async () => { try { await api("admin/settings", "PATCH", { ai: { ...s.ai, fallbackModels: s.ai.fallbackModels.filter((m) => m.trim()) }, rates: s.rates, tokens: s.tokens, plans: s.plans, packs: s.packs, inactivityDays: s.inactivityDays }); flash("Tarifs enregistrés (actifs immédiatement)."); reload(); } catch (e) { setErr((e as Error).message); } };
   const F = ({ l, v, on, step = 1 }: { l: string; v: number; on: (n: number) => void; step?: number }) => <label className="block text-xs"><span className="mb-1 block text-muted">{l}</span><input type="number" step={step} min={0} className="field" value={v} onChange={(e) => on(num(e.target.value))} /></label>;
   return (
     <div className="mt-6 space-y-8">
+      <section><h2 className="mb-1 text-sm font-semibold">Analyse IA : modèle et replis</h2>
+        <p className="mb-3 text-xs text-muted">Si le modèle principal est surchargé (erreur 503/429), l'analyse peut être retentée automatiquement : 0 = jamais, jusqu'à 2 replis. Chaque repli utilise le modèle indiqué ci-dessous, ou retente le principal s'il est laissé vide. Les identifiants sont à relire dans la doc Gemini.</p>
+        <div className="grid gap-3 sm:grid-cols-4">
+          <label className="block text-xs sm:col-span-2"><span className="mb-1 block text-muted">Modèle principal</span><input className="field font-mono" value={s.ai.model} onChange={(e) => setS({ ...s, ai: { ...s.ai, model: e.target.value } })} /></label>
+          <label className="block text-xs"><span className="mb-1 block text-muted">Nombre de replis (0 à 2)</span>
+            <select className="field" value={s.ai.maxFallbacks} onChange={(e) => setS({ ...s, ai: { ...s.ai, maxFallbacks: Number(e.target.value) } })}><option value={0}>0 : aucun repli</option><option value={1}>1 repli</option><option value={2}>2 replis</option></select></label>
+          <F l="Délai entre essais (ms)" v={s.ai.retryDelayMs} on={(n) => setS({ ...s, ai: { ...s.ai, retryDelayMs: Math.min(15000, n) } })} />
+          {[0, 1].map((i) => <label key={i} className={`block text-xs sm:col-span-2 ${s.ai.maxFallbacks > i ? "" : "opacity-40"}`}><span className="mb-1 block text-muted">Modèle du repli {i + 1}</span>
+            <input className="field font-mono" placeholder="vide = retenter le principal" disabled={s.ai.maxFallbacks <= i} value={s.ai.fallbackModels[i] ?? ""} onChange={(e) => { const m = [...s.ai.fallbackModels]; m[i] = e.target.value; setS({ ...s, ai: { ...s.ai, fallbackModels: m } }); }} /></label>)}
+        </div></section>
       <section><h2 className="mb-3 text-sm font-semibold">Tarifs en crédits</h2><div className="grid gap-3 sm:grid-cols-3">
         <F l="Analyse par minute de vidéo" v={s.rates.analysisPerMinute} on={(n) => setS({ ...s, rates: { ...s.rates, analysisPerMinute: n } })} />
         <F l="Génération (phase 2)" v={s.rates.generation} on={(n) => setS({ ...s, rates: { ...s.rates, generation: n } })} />

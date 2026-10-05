@@ -20,7 +20,7 @@ dis-le clairement et décris la modification du cœur nécessaire, séparément.
 
 **Pour l'IA :** livre toujours 1) le fichier complet, 2) les deux lignes d'enregistrement, 3) un exemple JSON d'utilisation, 4) les réglages par défaut justifiés. Ne modifie jamais un autre fichier que ceux cités ici.
 
-**Ce que « un élément » veut dire.** Tout ce qui s'ajoute **sans toucher au moteur** est un *effet* (un fichier dans `src/effects/` + une ligne dans `src/effects/index.ts`). Il en existe 10 types (`kind`), listés au §3. Le reste (nouveaux champs de clip, nouveaux types de piste, nouvelles capacités de rendu) demande de modifier le cœur : voir §8.
+**Ce que « un élément » veut dire.** Tout ce qui s'ajoute **sans toucher au moteur** est un *effet* (un fichier dans `src/effects/` + une ligne dans `src/effects/index.ts`). Il en existe 11 types (`kind`), listés au §3. Le reste (nouveaux champs de clip, nouveaux types de piste, nouvelles capacités de rendu) demande de modifier le cœur : voir §8.
 
 ---
 
@@ -49,7 +49,7 @@ import { defineEffect } from "@/lib/schema";
 
 export default defineEffect({
   id: "mon_effet_v1",              // OBLIGATOIRE. snake_case, ^[a-z][a-z0-9_]{1,40}$, unique, = nom du fichier
-  kind: "fx",                      // OBLIGATOIRE. fx|mesh|overlay|transition|caption_style|text_style|motion_preset|lut|sfx
+  kind: "fx",                      // OBLIGATOIRE. fx|mesh|overlay|transition|caption_style|text_style|motion_preset|lut|sfx|audio_fx
                                    //   (réservés, non rendus en phase 1 : shape_preset)
   status: "active",                // OBLIGATOIRE. "active" | "deprecated" (voir §9)
   cost: "light",                   // OBLIGATOIRE. "light" | "heavy" (indicatif, affiché dans l'admin)
@@ -64,6 +64,7 @@ export default defineEffect({
   draw: ({ g, w, h, t, dur, text, words, emphasis, params, reveal }) => { … },  // caption_style, text_style
   motion: ({ t, dur, params }) => ({ scale, opacity, dx, dy, rot }),             // motion_preset
   url: "/sfx/mon_son_v1.mp3", duration: 650,                                      // sfx
+  audio: { setup?, build: ({ ctx, params, dur }) => ({ input, output }) },        // audio_fx (graphe Web Audio, voir §5.9)
   fonts: ['800 60px "Instrument Sans"'],  // optionnel : polices à charger avant le rendu (styles de texte)
 });
 ```
@@ -72,7 +73,7 @@ Types exacts (extrait de `src/lib/schema.ts`) :
 
 ```ts
 type Ms = number; // millisecondes entières
-type EffectKind = "fx"|"mesh"|"overlay"|"transition"|"caption_style"|"text_style"|"shape_preset"|"motion_preset"|"lut"|"sfx";
+type EffectKind = "fx"|"mesh"|"overlay"|"transition"|"caption_style"|"text_style"|"shape_preset"|"motion_preset"|"lut"|"sfx"|"audio_fx";
 interface DrawArgs {
   g: CanvasRenderingContext2D;  // contexte 2D déjà EFFACÉ, taille w×h
   w: number; h: number;         // taille du canvas de rendu en pixels (540 de large en aperçu, pleine taille à l'export)
@@ -83,12 +84,16 @@ interface DrawArgs {
   params: Record<string, any>;  // paramètres résolus, bornés, complétés des défauts
   reveal?: { by: "letters"|"words"|"lines"; stagger: Ms };  // texte seulement : révélation demandée
 }
+interface AudioFxDef {
+  setup?: (ctx: BaseAudioContext) => Promise<void>;     // optionnel : charger un AudioWorklet (voir ensureWorklet dans lib/dsp.ts)
+  build: (a: { ctx: BaseAudioContext; params: Record<string, any>; dur: number }) => { input: AudioNode; output: AudioNode };  // dur en SECONDES
+}
 interface MotionOut { scale?: number; opacity?: number; dx?: number; dy?: number; rot?: number }
 ```
 
 ---
 
-## 3. Les 10 types et où ils se branchent
+## 3. Les 11 types et où ils se branchent
 
 | `kind` | S'utilise dans le JSON via | Reçoit | Produit | Rendu en phase 1 |
 |---|---|---|---|---|
@@ -101,11 +106,25 @@ interface MotionOut { scale?: number; opacity?: number; dx?: number; dy?: number
 | `text_style` | clip d'une piste `text` : `style: id` (+ `params`) | le texte | un dessin 2D | oui |
 | `motion_preset` | `clip.motion: {preset: id, params}` | temps local, durée | échelle, opacité, décalage, rotation | oui |
 | `sfx` | clip d'une piste `audio` : `asset: "sfx:<id>"` | — | un son | oui |
+| `audio_fx` | `clip.afx: [{id, params}]` sur un **clip vidéo avec son** ou un **clip audio** | le son du clip | un son transformé | oui (lecture + export) |
 | `shape_preset` | clip d'une piste `shape` | — | — | **non (phase 2)** |
 
 Champs réservés (acceptés par le type mais **ignorés** au rendu) : `Component` (overlay React/R3F), `engine: "sdf" | "extrude"`.
 
 ---
+
+### Quel effet sur quel média ?
+
+| Effet | Vidéo | **Image / photo** | Texte, sous-titres | Son (clip audio) |
+|---|---|---|---|---|
+| `fx` (image) | oui | **oui** | oui | — |
+| `mesh` (déformation) | oui | **oui** | oui | — |
+| `motion_preset` (animation) | oui | **oui** (ex. `ken_burns_v1`) | oui | — |
+| transformation, blend, `transition`, `lut` | oui | **oui** | oui (sauf `lut`) | — |
+| `audio_fx` (son) | oui, **si le rush a du son** | non (pas de son) | — | oui |
+| `overlay` | piste dédiée | piste dédiée | — | — |
+
+Une image est un clip de piste vidéo : tout ce qui s'applique à une vidéo s'applique à une photo, **sans effet spécifique à écrire**. Seuls les effets audio ne la concernent pas.
 
 ## 4. Les paramètres (`params: z.object({...})`)
 
@@ -367,7 +386,47 @@ export default defineEffect({
 ```
 3. Utilisation (clip d'une piste `audio`) : `{ "id": "s1", "asset": "sfx:whoosh_v1", "at": 1200, "dur": 650, "gain": 0.8 }`. **`dur` est obligatoire** pour un son (sans `dur`, le clip a une durée nulle et reste muet). Le clip peut aussi s'ancrer à un mot (`anchor`). `fade: [entréeMs, sortieMs]` est supporté.
 
-### 5.9 Réservés (non rendus en phase 1)
+### 5.9 `audio_fx` — transformer le son d'un clip (vidéo OU audio)
+Un effet audio est un **petit graphe Web Audio** : tu crées des nœuds (`ctx.createGain()`, `createDelay()`, `createBiquadFilter()`, `createConvolver()`, `createWaveShaper()`, `new AudioWorkletNode(...)`…), tu les relies, et tu retournes `{ input, output }`. Le système branche le son du clip sur `input` et `output` vers la sortie.
+- **Il s'applique à tout clip qui a du son** : clip audio (musique, voix, sfx) **et clip vidéo dont le rush a une piste audio** (c'est la voix de la vidéo). Pour une image ou une vidéo sans son, la section n'apparaît pas dans l'Inspector et `afx` est sans effet.
+- **Un seul code, deux contextes** : le même `build` tourne en **lecture** (AudioContext temps réel) et à l'**export** (OfflineAudioContext). N'utilise donc que le `ctx` reçu : jamais `new AudioContext()`, jamais d'horloge, jamais `Math.random()` (utilise un générateur à graine, voir `reverb_room_v1`) — sinon l'aperçu et l'export ne sonneraient pas pareil.
+- **Paramètres constants** sur la durée du clip (pas d'images clés pour l'audio) : ce que tu reçois dans `params` est borné et complété, comme pour les autres effets. Mêmes règles de `z.object` (§4) ; les noms ne sont pas des uniforms GLSL, donc aucune restriction de noms.
+- `build` est **synchrone**. Si tu as besoin de code asynchrone (charger un worklet), fais-le dans `setup(ctx)`, appelé et attendu avant `build`.
+- Volume et fondus du clip sont appliqués **avant** ton effet ; les queues (écho, réverbération) se prolongent après la fin du clip en lecture, mais l'export s'arrête à la fin de la timeline.
+- `dur` = durée du clip en **secondes** (utile pour dimensionner un buffer).
+- Les effets qui exigent du **calcul sur le signal** (décalage de hauteur, vocodeur…) ne sont pas des nœuds standard : écris le traitement comme un `AudioWorkletProcessor`, fournis son code **sous forme de texte** et charge-le avec `ensureWorklet` (`src/lib/dsp.ts`). Modèle réel : `autotune_v1` + son moteur `PitchCorrector`, testé sur des sinusoïdes (`src/lib/dsp.test.ts`). Le texte du worklet ne doit référencer aucune variable extérieure.
+
+Exemple — écho (retard avec rétroaction filtrée) :
+```ts
+//src/effects/echo_v1.ts
+import { z } from "zod";
+import { defineEffect } from "@/lib/schema";
+export default defineEffect({
+  id: "echo_v1", kind: "audio_fx", status: "active", cost: "light",
+  describe: "Écho qui se répète en s'estompant ; pour une voix dans un grand espace ou un mot qui doit résonner.",
+  params: z.object({
+    time: z.number().min(60).max(1000).default(320),
+    feedback: z.number().min(0).max(0.9).default(0.45),
+    mix: z.number().min(0).max(1).default(0.4),
+    tone: z.number().min(800).max(12000).default(4000),
+  }),
+  audio: {
+    build: ({ ctx, params }) => {
+      const input = ctx.createGain(), output = ctx.createGain(), dry = ctx.createGain(), wet = ctx.createGain();
+      const delay = ctx.createDelay(1.5), fb = ctx.createGain(), lp = ctx.createBiquadFilter();
+      delay.delayTime.value = params.time / 1000; fb.gain.value = params.feedback; wet.gain.value = params.mix;
+      lp.type = "lowpass"; lp.frequency.value = params.tone;
+      input.connect(dry); dry.connect(output);
+      input.connect(delay); delay.connect(lp); lp.connect(fb); fb.connect(delay);   // boucle de rétroaction
+      lp.connect(wet); wet.connect(output);
+      return { input, output };
+    },
+  },
+});
+```
+Effets audio fournis : `echo_v1` (écho), `delay_v1` (une répétition), `reverb_room_v1` (réverbération de pièce), `radio_voice_v1` (voix radio/téléphone), `autotune_v1` (correction de hauteur, voix seule ; latence ≈ 20 ms). Utilisation : `"afx": [{ "id": "echo_v1", "params": { "mix": 0.25 } }]` sur un clip vidéo ou audio ; les effets s'enchaînent dans l'ordre du tableau (8 maximum).
+
+### 5.10 Réservés (non rendus en phase 1)
 `shape_preset`, `Component` (overlay en composant R3F), `engine: "sdf" | "extrude"`. Ne les utilise pas : ils ne produisent rien. Voir §8 pour les activer.
 
 ---
@@ -393,8 +452,8 @@ Composition { v: 2, canvas:{w,h,fps}, assets:{ [id]: Asset }, grade?:{lut:id, am
 Num = number | { kf: [[tMs, valeur, easing?], …] }       Col = "#RRGGBB" | { kf: [[tMs, "#RRGGBB"], …] }
 
 Asset (vidéo) { type:"video", name?, desc?, w,h, dur, fps, rot?, hasAudio, bytes, fp, remote?, proxy?, words?: Word[] }
-Asset (image) { type:"image", name?, w, h, fp?, remote?, bytes? }          // se place dans un VideoClip : src:[0, duréeMs] = image fixe (fit "contain" par défaut)
-Asset (audio) { type:"audio", name?, dur, fp?, remote?, bytes?, words? }   // se place dans un AudioClip
+Asset (image) { type:"image", name?, desc?, w, h, fp?, remote?, proxy?, bytes? }          // se place dans un VideoClip : src:[0, duréeMs] = image fixe (fit "contain" par défaut)
+Asset (audio) { type:"audio", name?, desc?, dur, fp?, remote?, proxy?, bytes?, words? }   // se place dans un AudioClip
 Word { t:"mot", s:ms, e:ms }                               // temps de la SOURCE, jamais de la timeline
 
 Track { id, kind, locked?, muted?, clips[] }               // kind: video | adjustment | overlay | text | caption | shape | audio
@@ -406,13 +465,13 @@ Transform { pos?:{x,y,z?}, scale?: Num | {x:Num,y:Num}, rot?: Num (°, horaire),
             corners?: [[x,y]×4] (corner pin, ordre HG,HD,BD,BG, 0..1), opacity?: Num }
             // pos : fraction du canvas, (0.5,0.5) = centre, y vers le bas. pivot : ignoré.
 
-VideoClip      { id, asset, src:[ms,ms], speed?:Num, fit?:"cover"|"contain"|"fill", volume?:Num, …communs }
+VideoClip      { id, asset, src:[ms,ms], speed?:Num, fit?:"cover"|"contain"|"fill", volume?:Num, afx?:[{id,params}] (effets audio), …communs }
                // « asset » peut être une vidéo OU une image : les fx, mesh, motion, transform et blend s'appliquent de la même façon aux images.
 AdjustmentClip { id, at?, dur?, span?:[idClipA,idClipB], fx:[…] }       // span : suit automatiquement ces clips
 OverlayClip    { id, effect, params?, at?, dur?, blend? }                // (transform/motion/fx/mesh ignorés)
 TextClip       { id, text?, counter?:{from,to,suffix?,dur}, style, params?, reveal?:{by,effect,stagger?}, …communs }
 CaptionClip    { id, from: idDuClipVidéo, style, params?, emphasis?:[i,j], …communs }   // durée = celle du clip source
-AudioClip      { id, asset: idAsset | "sfx:idEffet", src?, at?, anchor?, gain?:Num, fade?:[in,out], dur? }
+AudioClip      { id, asset: idAsset | "sfx:idEffet", src?, at?, anchor?, gain?:Num, fade?:[in,out], dur?, afx?:[{id,params}] }
 Transition     { between:[idA,idB], effect, dur, params? }               // uniquement entre deux clips d'une piste video magnétique
 ```
 
@@ -428,7 +487,7 @@ Exemple complet qui valide (utilise `vignette`, `bw`, `frame_neon_v1`, `cloth_wa
   "grade": { "lut": "teal_orange", "amount": 0.7 },
   "tracks": [
     { "id": "v1", "kind": "video", "magnetic": true, "clips": [
-      { "id": "c1", "asset": "r1", "src": [0, 3200], "speed": 1,
+      { "id": "c1", "asset": "r1", "src": [0, 3200], "speed": 1, "afx": [{ "id": "echo_v1", "params": { "mix": 0.25 } }],
         "transform": { "scale": { "kf": [[0, 1], [3200, 1.15, "outCubic"]] } },
         "mesh": { "id": "cloth_wave_v1", "params": { "amp": 0.05 } },
         "fx": [{ "id": "vignette", "params": { "intensity": 0.6 } }] },
@@ -459,7 +518,7 @@ Exemple complet qui valide (utilise `vignette`, `bw`, `frame_neon_v1`, `cloth_wa
 | Temps local du clip dans les shaders (`uLocal`) | `src/lib/render.tsx` : ajouter l'uniform dans `runFx`/`drawLayer` |
 | Textures supplémentaires (bruit, image, .cube) | `render.tsx` + champ d'assets d'effet dans `schema.ts` |
 | Effets temporels (traînées, feedback) | `render.tsx` : render target persistante entre images |
-| Effets audio (écho, filtre) | `schema.ts` (`EffectKind`) + `mixAudio` et `PreviewSource` dans `render.tsx` |
+| Animer les réglages d'un effet audio dans le temps | `render.tsx` : automation d'`AudioParam` dans `routeAudio` et `mixAudio` |
 | Nouveau champ sur un clip | `schema.ts` (objet strict) + `Inspector.tsx` + `responseSchema` dans `gemini.ts` |
 | Nouveau type de piste | union `TrackS` dans `schema.ts` + `engine.ts` (layout) + `render.tsx` + `Timeline.tsx` |
 | `shape`, `matte`, `behind`, `Component` R3F, `sdf`, `extrude`, `pivot`, particules, modèles 3D | `render.tsx` (phase 2) |
@@ -498,7 +557,7 @@ Chaque effet devient une ligne du prompt, que l'IA lit pour choisir :
 
 ```bash
 npm run typecheck      # le fichier compile
-npm test               # test de conformité du registre : id, describe, bornes, noms d'uniforms, signature shader, pureté de draw/motion
+npm test               # test de conformité du registre : id, describe, bornes, noms d'uniforms, signature shader, pureté de draw/motion, build() des effets audio sur un contexte factice
 npm run dev            # puis essayer visuellement
 ```
 Le test de conformité (`src/effects/registry.test.ts`) **échoue** si : id invalide/en double, `describe` hors 20–240 caractères, nombre sans bornes ou défaut hors bornes, nom de paramètre réservé, shader sans `vec4 fx(vec2 uv)` ou avec `main`/`#version`/redéclaration d'un uniform fourni, mesh sans `vec3 deform(vec3 p, vec2 uv)`, style de texte utilisant `Math.random`/`Date.now`, motion non pure, sfx sans URL `/sfx/…` ou sans durée.
@@ -523,4 +582,7 @@ Test visuel : `npm run dev` → Tableau de bord → « Essayer avec un exemple �
 - [ ] `motion` qui suppose des `params` complets (ils ne sont ni bornés ni complétés).
 - [ ] Son sans `dur` sur son clip audio ; fichier `public/sfx` remplacé au lieu d'être versionné.
 - [ ] Effet existant modifié au lieu de créer `_v2`.
+- [ ] Effet audio : `new AudioContext()`, `Math.random()` ou horloge dans `build` (aperçu ≠ export) ; réglages supposés animables (ils sont constants).
+- [ ] Effet audio qui suppose du **stéréo** ou une **durée** : le son peut être mono, et seules les queues de l'effet dépassent le clip.
+- [ ] Texte d'un worklet qui référence une variable extérieure (le minifieur la renomme : le worklet casse en production).
 - [ ] Oubli de la ligne dans `src/effects/index.ts` (import **et** entrée du tableau).

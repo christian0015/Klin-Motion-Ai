@@ -15,9 +15,17 @@ import popIn from "./pop_in";
 import minimalClean from "./minimal_clean";
 import cleanTitle from "./clean_title";
 import glitchCut from "./glitch_cut";
+import echo from "./echo_v1";
+import delay from "./delay_v1";
+import reverbRoom from "./reverb_room_v1";
+import radioVoice from "./radio_voice_v1";
+import autotune from "./autotune_v1";
+import kenBurns from "./ken_burns_v1";
 
 export const EFFECTS: EffectDef[] = [
-  vignette, bw, frameNeon, clothWave, tealOrange, popIn, minimalClean, cleanTitle, glitchCut,
+  vignette, bw, frameNeon, clothWave, tealOrange, popIn, minimalClean, cleanTitle, glitchCut, kenBurns,
+  // audio_fx (Web Audio) : appliqués aux clips vidéo et audio via `afx`
+  echo, delay, reverbRoom, radioVoice, autotune,
   // ← phase 2 : une ligne par nouvel effet
 ];
 

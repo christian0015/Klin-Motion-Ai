@@ -14,7 +14,7 @@ import Preview from "./Preview";
 import Timeline from "./Timeline";
 import Inspector from "./Inspector";
 import { useEditor, type VersionMeta } from "@/lib/store";
-import { ApiError, api, fingerprint, getFile, hasLocal, importRush, makeProxy, probe, remember, uploadBlob } from "@/lib/media";
+import { ApiError, api, fingerprint, getFile, hasLocal, importRush, makeAudioProxy, makeImageProxy, makeProxy, probe, remember, uploadBlob } from "@/lib/media";
 import { exportMp4 } from "@/lib/render";
 import { layoutDoc, validate } from "@/lib/engine";
 import { getEffect } from "@/effects";
@@ -22,7 +22,7 @@ import type { Asset, Brief, Composition } from "@/lib/schema";
 
 type MediaAsset = Extract<Asset, { type: "video" | "image" | "audio" }>;
 
-interface Me { credits: number; limits: { watermark: boolean }; analysis: { proxyShortSide: number; proxyFps: number }; disabledEffects: string[] }
+interface Me { credits: number; limits: { watermark: boolean }; analysis: { proxyShortSide: number; proxyFps: number; imageProxySide: number }; disabledEffects: string[] }
 interface Initial { id: string; name: string; rev: number; brief: Brief; doc: Composition }
 
 export default function Editor({ initial }: { initial: Initial }) {
@@ -148,19 +148,21 @@ export default function Editor({ initial }: { initial: Initial }) {
 
   /* ───── analyse IA : proxys → estimation → confirmation → job → un seul patch ───── */
   const prepareAndEstimate = async () => {
-    const targets = videoAssets.filter(([id]) => used.has(id));
-    if (!targets.length) { say("err", "Aucun rush dans la timeline : ajoutez une vidéo, ou utilisez « Ajouter à la timeline » dans le panneau Rushs."); return; }
+    const targets = mediaAssets.filter(([id]) => used.has(id));   // vidéos, images ET sons placés : l'IA les voit tous
+    if (!targets.some(([, a]) => a.type === "video")) { say("err", "Aucun rush vidéo dans la timeline : ajoutez une vidéo, ou utilisez « Ajouter à la timeline » dans le panneau Médias."); return; }
     try {
-      const cfg = me?.analysis ?? { proxyShortSide: 240, proxyFps: 12 }; const st = useEditor.getState();
+      const cfg = me?.analysis ?? { proxyShortSide: 240, proxyFps: 12, imageProxySide: 768 }, st = useEditor.getState();
       let i = 0;
       for (const [id, a] of targets) {
         if (a.proxy) { i++; continue; }
-        st.setStatus("proxying", i / targets.length, `Préparation de « ${a.name ?? id} »…`);
-        const file = await getFile(st.projectId, id, a, () => st.setSync(id, { state: "downloading" }));
-        if (!file) throw new Error(a.fp.startsWith("example-") ? "Le projet d'exemple n'a pas de vraie vidéo : utilisez « Relier une vraie vidéo » dans le panneau Rushs." : `Rush manquant : « ${a.name ?? id} ». Redonnez le fichier dans le panneau Rushs.`);
-        const proxy = await makeProxy(file, a, cfg, (p) => st.setStatus("proxying", (i + p) / targets.length, `Préparation de « ${a.name ?? id} »…`));
-        const key = await uploadBlob(proxy, { projectId: st.projectId, assetId: id, kind: "proxy", type: proxy.type || "video/mp4", fp: a.fp });
-        useEditor.getState().silent((d) => { const x = d.assets[id]; if (x?.type === "video") x.proxy = key; });
+        const name = a.name ?? id, fp = (a as { fp?: string }).fp ?? id;
+        st.setStatus("proxying", i / targets.length, `Préparation de « ${name} »…`);
+        const file = await getFile(st.projectId, id, a as { fp?: string; remote?: string; bytes?: number }, () => st.setSync(id, { state: "downloading" }));
+        if (!file) throw new Error(fp.startsWith("example-") ? "Le projet d'exemple n'a pas de vraie vidéo : utilisez « Relier une vraie vidéo » dans le panneau Médias." : `Média manquant : « ${name} ». Redonnez le fichier dans le panneau Médias.`);
+        const progress = (p: number) => st.setStatus("proxying", (i + p) / targets.length, `Préparation de « ${name} »…`);
+        const proxy = a.type === "video" ? await makeProxy(file, a, cfg, progress) : a.type === "image" ? await makeImageProxy(file, cfg.imageProxySide) : await makeAudioProxy(file, progress);
+        const key = await uploadBlob(proxy, { projectId: st.projectId, assetId: id, kind: "proxy", type: proxy.type || (a.type === "video" ? "video/mp4" : a.type === "image" ? "image/jpeg" : "audio/wav"), fp });
+        useEditor.getState().silent((d) => { const x = d.assets[id]; if (x && (x.type === "video" || x.type === "image" || x.type === "audio")) x.proxy = key; });
         i++;
       }
       st.setStatus("proxying", 1, "Enregistrement…");
@@ -264,10 +266,10 @@ export default function Editor({ initial }: { initial: Initial }) {
                   <div key={id} className="rounded-lg border border-line p-2 text-xs">
                     <p className="truncate font-medium" title={a.name}><span className="chip mr-1.5">{a.type === "video" ? "Vidéo" : a.type === "image" ? "Image" : "Audio"}</span>{a.name ?? id}</p>
                     <p className="mt-0.5 text-muted">{meta}</p>
-                    {a.type === "video" && <input className="field mt-1.5 !py-1" placeholder="Description (optionnel, lue par l'IA)" defaultValue={a.desc ?? ""} maxLength={500} onBlur={(e) => act.apply("Description du rush", (d) => { const x = d.assets[id]; if (x?.type === "video") x.desc = e.target.value || undefined; })} />}
+                    <input className="field mt-1.5 !py-1" placeholder="Description (optionnel, lue par l'IA)" defaultValue={a.desc ?? ""} maxLength={500} onBlur={(e) => act.apply("Description du média", (d) => { const x = d.assets[id]; if (x && (x.type === "video" || x.type === "image" || x.type === "audio")) x.desc = e.target.value || undefined; })} />
                     <p className={`mt-1.5 ${sy?.state === "missing" ? "text-warn" : "text-muted"}`}>
                       {sy?.state === "uploading" ? `Synchronisation… ${Math.round(sy.progress * 100)} %` : sy?.state === "synced" ? "Synchronisé ✓" : sy?.state === "downloading" ? "Téléchargement depuis le cloud…" : sy?.state === "missing" ? (example ? "Exemple : aucune vidéo réelle" : "Fichier absent de cet appareil") : "Local (non synchronisé)"}
-                      {a.type === "video" && a.proxy ? " · prêt pour l'IA" : ""}{!used.has(id) ? " · non utilisé dans la timeline" : ""}
+                      {a.proxy ? " · prêt pour l'IA" : ""}{!used.has(id) ? " · non utilisé dans la timeline" : ""}
                     </p>
                     {sy?.error && <p className="mt-1 text-warn">{sy.error}</p>}
                     <div className="mt-1.5 flex gap-1.5">

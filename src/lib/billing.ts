@@ -11,11 +11,13 @@ import type { Settings } from "./schema";
 
 export interface Estimate { tokens: number; credits: number; minutes: number }
 /** Formule 7.3 : images analysées × tokens/image + audio. Constantes dans ANALYSIS. */
-export function estimateAnalysis(totalDurMs: number, s: Settings): Estimate {
-  const sec = totalDurMs / 1000;
-  const tokens = Math.ceil(sec * ANALYSIS.samplingFps * ANALYSIS.tokensPerFrame + sec * ANALYSIS.audioTokensPerSec);
+export function estimateAnalysis(totalDurMs: number, s: Settings, extra: { images?: number; audioMs?: number } = {}): Estimate {
+  const sec = totalDurMs / 1000, images = extra.images ?? 0, audioSec = (extra.audioMs ?? 0) / 1000;
+  const tokens = Math.ceil(sec * ANALYSIS.samplingFps * ANALYSIS.tokensPerFrame + sec * ANALYSIS.audioTokensPerSec + images * ANALYSIS.tokensPerImage + audioSec * ANALYSIS.audioTokensPerSec);
   const minutes = sec / 60;
-  return { tokens, minutes, credits: Math.max(1, Math.ceil(minutes * s.rates.analysisPerMinute)) };
+  // Un son pèse 1/4 d'une minute de vidéo, une image 1/50 de minute : coût d'analyse en minutes équivalentes
+  const eq = minutes + audioSec / 60 / 4 + images / 50;
+  return { tokens, minutes, credits: Math.max(1, Math.ceil(eq * s.rates.analysisPerMinute)) };
 }
 export const planOf = (user: { plan?: string }, s: Settings) => s.plans[user.plan ?? "free"] ?? s.plans.free;
 export const storageOk = (user: { plan?: string; storageBytes?: number }, s: Settings, add: number) =>

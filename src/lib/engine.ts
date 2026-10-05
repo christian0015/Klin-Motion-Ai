@@ -233,6 +233,7 @@ export function validate(doc: Composition, known: (id: string) => boolean, layou
   for (const t of doc.tracks) for (const c of t.clips as any[]) {
     if (seen.has(c.id)) w.push({ clipId: c.id, code: "dup_id", msg: `Identifiant en double : ${c.id}.` }); seen.add(c.id);
     for (const f of c.fx ?? []) unk(c.id, f.id, "Effet");
+    for (const f of c.afx ?? []) unk(c.id, f.id, "Effet audio");
     if (c.mesh) unk(c.id, c.mesh.id, "Déformation");
     if (c.motion) unk(c.id, c.motion.preset, "Animation");
     if (t.kind === "overlay") unk(c.id, c.effect, "Overlay");
