@@ -31,7 +31,7 @@ export default function Admin() {
       {!stats && !err && <div className="skeleton mt-6 h-40" />}
       {stats && tab === "overview" && <Overview s={stats} />}
       {stats && tab === "users" && <Users plans={Object.keys(stats.settings.plans)} flash={flash} setErr={setErr} />}
-      {stats && tab === "pricing" && <Pricing settings={stats.settings} flash={flash} setErr={setErr} reload={loadStats} />}
+      {stats && tab === "pricing" && <Pricing settings={stats.settings} payment={stats.payment} flash={flash} setErr={setErr} reload={loadStats} />}
       {stats && tab === "effects" && <Effects s={stats} flash={flash} setErr={setErr} reload={loadStats} />}
       {tab === "jobs" && <Jobs flash={flash} setErr={setErr} />}
     </div>
@@ -85,10 +85,10 @@ function Users({ plans, flash, setErr }: { plans: string[]; flash: (m: string) =
   );
 }
 
-function Pricing({ settings, flash, setErr, reload }: { settings: Settings; flash: (m: string) => void; setErr: (m: string) => void; reload: () => void }) {
+function Pricing({ settings, payment, flash, setErr, reload }: { settings: Settings; payment: { provider: string; sandbox: boolean; webhookUrl: string; activeSubscribers: number }; flash: (m: string) => void; setErr: (m: string) => void; reload: () => void }) {
   const [s, setS] = useState<Settings>(settings);
   const num = (v: string) => (v === "" ? 0 : Number(v));
-  const save = async () => { try { await api("admin/settings", "PATCH", { ai: { ...s.ai, fallbackModels: s.ai.fallbackModels.filter((m) => m.trim()) }, rates: s.rates, tokens: s.tokens, plans: s.plans, packs: s.packs, inactivityDays: s.inactivityDays }); flash("Tarifs enregistrés (actifs immédiatement)."); reload(); } catch (e) { setErr((e as Error).message); } };
+  const save = async () => { try { const r = await api("admin/settings", "PATCH", { billing: s.billing, subscriptionPlans: s.subscriptionPlans, gen: s.gen, ai: { ...s.ai, fallbackModels: s.ai.fallbackModels.filter((m) => m.trim()) }, rates: s.rates, tokens: s.tokens, plans: s.plans, packs: s.packs, inactivityDays: s.inactivityDays }); flash(r.renewals ? `Enregistré. ${r.renewals.done} abonnement(s) ne seront pas renouvelés (ils restent actifs jusqu'à la fin de la période payée)${r.renewals.failed ? ` ; ${r.renewals.failed} échec(s) : réessayez` : ""}.` : "Tarifs enregistrés (actifs immédiatement)."); reload(); } catch (e) { setErr((e as Error).message); } };
   const F = ({ l, v, on, step = 1 }: { l: string; v: number; on: (n: number) => void; step?: number }) => <label className="block text-xs"><span className="mb-1 block text-muted">{l}</span><input type="number" step={step} min={0} className="field" value={v} onChange={(e) => on(num(e.target.value))} /></label>;
   return (
     <div className="mt-6 space-y-8">
@@ -110,14 +110,39 @@ function Pricing({ settings, flash, setErr, reload }: { settings: Settings; flas
         <F l="$ / million de tokens entrée" step={0.01} v={s.tokens.usdPerMTokIn} on={(n) => setS({ ...s, tokens: { ...s.tokens, usdPerMTokIn: n } })} />
         <F l="$ / million de tokens sortie" step={0.01} v={s.tokens.usdPerMTokOut} on={(n) => setS({ ...s, tokens: { ...s.tokens, usdPerMTokOut: n } })} />
         <F l="$ / Go / mois (stockage)" step={0.001} v={s.tokens.usdPerGBMonth} on={(n) => setS({ ...s, tokens: { ...s.tokens, usdPerGBMonth: n } })} />
-        <F l="Valeur d'un crédit en $" step={0.001} v={s.tokens.usdPerCredit} on={(n) => setS({ ...s, tokens: { ...s.tokens, usdPerCredit: n } })} /></div></section>
+        <F l="Valeur d'un crédit en $" step={0.001} v={s.tokens.usdPerCredit} on={(n) => setS({ ...s, tokens: { ...s.tokens, usdPerCredit: n } })} />
+        <F l="Coût réel d'une image ($)" step={0.001} v={s.tokens.usdPerImage} on={(n) => setS({ ...s, tokens: { ...s.tokens, usdPerImage: n } })} />
+        <F l="Coût réel d'une seconde de vidéo ($)" step={0.01} v={s.tokens.usdPerVideoSec} on={(n) => setS({ ...s, tokens: { ...s.tokens, usdPerVideoSec: n } })} /></div></section>
       <section><h2 className="mb-3 text-sm font-semibold">Quotas par offre</h2>
         {Object.entries(s.plans).map(([k, p]) => <div key={k} className="mb-3 grid gap-3 rounded-lg border border-line p-3 sm:grid-cols-5"><p className="self-end font-medium capitalize">{k}</p>
           <F l="Stockage (Go)" v={p.storageGB} on={(n) => setS({ ...s, plans: { ...s.plans, [k]: { ...p, storageGB: n } } })} /><F l="Analyses / jour" v={p.dailyAnalyses} on={(n) => setS({ ...s, plans: { ...s.plans, [k]: { ...p, dailyAnalyses: n } } })} />
           <F l="Durée max d'analyse (min)" v={p.maxProxyMinutes} on={(n) => setS({ ...s, plans: { ...s.plans, [k]: { ...p, maxProxyMinutes: Math.max(1, n) } } })} /><F l="Crédits d'inscription" v={p.signupCredits} on={(n) => setS({ ...s, plans: { ...s.plans, [k]: { ...p, signupCredits: n } } })} />
           <label className="flex items-center gap-2 text-xs sm:col-span-5"><input type="checkbox" checked={p.watermark} onChange={(e) => setS({ ...s, plans: { ...s.plans, [k]: { ...p, watermark: e.target.checked } } })} />Filigrane sur l'export</label></div>)}
         <F l="Purge des rushs après (jours d'inactivité)" v={s.inactivityDays} on={(n) => setS({ ...s, inactivityDays: Math.max(1, n) })} /></section>
-      <section><h2 className="mb-3 text-sm font-semibold">Packs de crédits</h2>{s.packs.map((p, i) => <div key={p.id} className="mb-2 grid grid-cols-3 gap-3"><p className="self-end text-sm">{p.label}</p><F l="Crédits" v={p.credits} on={(n) => setS({ ...s, packs: s.packs.map((x, j) => (j === i ? { ...x, credits: Math.max(1, n) } : x)) })} /><F l={`Prix (${p.currency})`} v={p.price} step={0.5} on={(n) => setS({ ...s, packs: s.packs.map((x, j) => (j === i ? { ...x, price: n } : x)) })} /></div>)}</section>
+      <section><h2 className="mb-1 text-sm font-semibold">Génération d'images et de vidéos</h2>
+        <p className="mb-3 text-xs text-muted">L'utilisateur confirme toujours avant de dépenser. Une génération échouée est remboursée. La vidéo est de loin le poste le plus cher : gardez le prix en crédits au-dessus du coût réel (renseigné dans « Coûts réels »). Identifiants de modèles à relire dans la doc Gemini.</p>
+        <label className="mb-2 flex items-center gap-2 text-sm"><input type="checkbox" checked={s.gen.enabled} onChange={(e) => setS({ ...s, gen: { ...s.gen, enabled: e.target.checked } })} />Génération activée</label>
+        <div className="grid gap-3 sm:grid-cols-4">
+          <label className="block text-xs sm:col-span-2"><span className="mb-1 block text-muted">Modèle d'image</span><input className="field font-mono" value={s.gen.imageModel} onChange={(e) => setS({ ...s, gen: { ...s.gen, imageModel: e.target.value } })} /></label>
+          <label className="block text-xs sm:col-span-2"><span className="mb-1 block text-muted">Modèle de vidéo</span><input className="field font-mono" value={s.gen.videoModel} onChange={(e) => setS({ ...s, gen: { ...s.gen, videoModel: e.target.value } })} /></label>
+          <F l="Crédits par image" v={s.gen.imageCredits} on={(n) => setS({ ...s, gen: { ...s.gen, imageCredits: Math.max(0, n) } })} />
+          <F l="Crédits par seconde de vidéo" v={s.gen.videoCreditsPerSec} on={(n) => setS({ ...s, gen: { ...s.gen, videoCreditsPerSec: Math.max(0, n) } })} />
+          <label className="block text-xs"><span className="mb-1 block text-muted">Durée max d'une vidéo</span><select className="field" value={s.gen.maxVideoSec} onChange={(e) => setS({ ...s, gen: { ...s.gen, maxVideoSec: Number(e.target.value) } })}><option value={4}>4 s</option><option value={6}>6 s</option><option value={8}>8 s</option></select></label>
+          <F l="Images par jour et par utilisateur" v={s.gen.dailyImages} on={(n) => setS({ ...s, gen: { ...s.gen, dailyImages: Math.max(0, n) } })} />
+          <F l="Vidéos par jour et par utilisateur" v={s.gen.dailyVideos} on={(n) => setS({ ...s, gen: { ...s.gen, dailyVideos: Math.max(0, n) } })} />
+        </div>
+        <label className="mt-3 flex items-center gap-2 text-sm"><input type="checkbox" checked={s.gen.videoEnabled} onChange={(e) => setS({ ...s, gen: { ...s.gen, videoEnabled: e.target.checked } })} />Vidéo générée activée</label>
+        <label className="mt-1 flex items-center gap-2 text-sm"><input type="checkbox" checked={s.gen.videoPaidOnly} onChange={(e) => setS({ ...s, gen: { ...s.gen, videoPaidOnly: e.target.checked } })} />Vidéo réservée aux comptes ayant acheté des crédits (évite les abus des crédits offerts)</label></section>
+      <section><h2 className="mb-1 text-sm font-semibold">Paiement</h2>
+        <p className="mb-3 text-xs text-muted">Prestataire : <b className="text-ink">{payment.provider === "polar" ? `Polar (${payment.sandbox ? "mode TEST" : "production"})` : "aucun : crédits accordés à la main"}</b>. URL du webhook à renseigner dans Polar : <span className="font-mono text-ink">{payment.webhookUrl}</span> (événements : order.paid, order.refunded, subscription.created / updated / active / canceled / revoked).</p>
+        <label className="mb-2 flex items-start gap-2 text-sm"><input type="checkbox" className="mt-1" checked={s.billing.oneTime} onChange={(e) => setS({ ...s, billing: { ...s.billing, oneTime: e.target.checked } })} /><span><b>Paiement en une fois</b> (packs de crédits). Le client paie une fois : aucun prélèvement ultérieur.</span></label>
+        <label className="flex items-start gap-2 text-sm"><input type="checkbox" className="mt-1" checked={s.billing.subscriptions} onChange={(e) => setS({ ...s, billing: { ...s.billing, subscriptions: e.target.checked } })} /><span><b>Abonnements mensuels</b>. Désactivés par défaut. Si vous les désactivez : plus de nouvel abonnement, et les abonnés actuels <b>ne sont pas suspendus</b> : ils gardent leur offre jusqu'à la fin de la période déjà payée, puis ne sont pas renouvelés. ({payment.activeSubscribers} abonné(s) actif(s))</span></label>
+        <p className="mt-2 text-xs text-muted">Les prix affichés ci-dessous sont indicatifs : <b>le prix réellement facturé est celui du produit Polar</b>. Créez chaque produit dans Polar (paiement unique pour un pack, récurrent mensuel pour un abonnement), puis collez son ID ici. Gardez les deux prix identiques.</p></section>
+      <section><h2 className="mb-3 text-sm font-semibold">Packs de crédits</h2>{s.packs.map((p, i) => <div key={p.id} className="mb-2 grid grid-cols-3 gap-3"><p className="self-end text-sm">{p.label}</p><F l="Crédits" v={p.credits} on={(n) => setS({ ...s, packs: s.packs.map((x, j) => (j === i ? { ...x, credits: Math.max(1, n) } : x)) })} /><F l={`Prix (${p.currency})`} v={p.price} step={0.5} on={(n) => setS({ ...s, packs: s.packs.map((x, j) => (j === i ? { ...x, price: n } : x)) })} /><label className="block text-xs"><span className="mb-1 block text-muted">ID produit Polar</span><input className="field font-mono" value={p.productId ?? ""} onChange={(e) => setS({ ...s, packs: s.packs.map((x, j) => (j === i ? { ...x, productId: e.target.value || undefined } : x)) })} /></label></div>)}</section>
+      <section><h2 className="mb-3 text-sm font-semibold">Abonnements mensuels</h2>{s.subscriptionPlans.map((p, i) => { const up = (patch: object) => setS({ ...s, subscriptionPlans: s.subscriptionPlans.map((x, j) => (j === i ? { ...x, ...patch } : x)) }); return (
+        <div key={p.id} className="mb-2 grid grid-cols-2 gap-3 sm:grid-cols-5"><p className="self-end text-sm">{p.label}</p><F l={`Prix / mois (${p.currency})`} v={p.price} step={0.5} on={(n) => up({ price: n })} /><F l="Crédits / mois" v={p.creditsPerMonth} on={(n) => up({ creditsPerMonth: Math.max(0, n) })} />
+          <label className="block text-xs"><span className="mb-1 block text-muted">Offre accordée</span><select className="field" value={p.plan} onChange={(e) => up({ plan: e.target.value })}>{Object.keys(s.plans).map((k) => <option key={k}>{k}</option>)}</select></label>
+          <label className="block text-xs"><span className="mb-1 block text-muted">ID produit Polar</span><input className="field font-mono" value={p.productId ?? ""} onChange={(e) => up({ productId: e.target.value || undefined })} /></label></div>); })}</section>
       <button className="btn btn-primary" onClick={save}>Enregistrer</button>
     </div>
   );

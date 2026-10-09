@@ -30,14 +30,14 @@ export default async function Landing() {
         <nav className="flex items-center gap-4 text-sm text-muted"><a href="#tarifs" className="hover:text-ink">Tarifs</a><Link href="/legal" className="hover:text-ink">Confidentialité</Link>{user && <Link href="/dashboard" className="btn !py-1.5">Mes projets</Link>}</nav>
       </header>
 
-      <section className="mx-auto grid max-w-6xl items-center gap-12 px-5 pb-24 pt-10 lg:grid-cols-[1.25fr_1fr] lg:pt-20">
+      <section className="mx-auto grid max-w-6xl items-center gap-12 px-5 pb-24 pt-10 lg:grid-cols-[1.25fr_1fr] lg:pt-2">
         <div>
-          <h1 className="chroma font-display text-[clamp(3.6rem,11vw,8.2rem)] leading-[0.9]">Déposez vos rushs, récupérez un film.</h1>
+          <h1 className="chroma font-display text-[clamp(3.6rem,11vw,6.2rem)] leading-[0.9]">Déposez vos rushs, récupérez un film.</h1>
           <p className="mt-8 max-w-xl text-lg leading-relaxed text-muted">Vous parlez à la caméra, vous décrivez ce que vous voulez : l'IA coupe, sous-titre et habille le montage avec un look cinéma. Vous retouchez ensuite chaque détail, directement dans l'éditeur.</p>
           <div className="mt-9 flex flex-wrap items-center gap-4"><Cta /><span className="text-sm text-muted">{free > 0 ? `${free} crédits offerts pour essayer, sans carte bancaire.` : "Connexion en un clic avec Google."}</span></div>
         </div>
         {/* démo : placeholder à remplacer par une vraie capture / vidéo */}
-        <div aria-hidden className="mx-auto w-full max-w-[22rem]">
+        <div aria-hidden className="mx-auto w-full max-w-[19rem]">
           <div className="relative aspect-[9/16] overflow-hidden rounded-[1.6rem] border border-line bg-[linear-gradient(160deg,#2a1d3a,#0f1a2b_55%,#3a1d2c)] shadow-[0_30px_80px_-20px_rgba(255,79,123,.35)]">
             <div className="absolute inset-0 opacity-70" style={{ background: "radial-gradient(circle at 50% 35%, rgba(255,216,160,.55), transparent 45%)" }} />
             <div className="absolute inset-x-5 bottom-[26%] text-center text-[1.7rem] font-extrabold leading-tight tracking-tight [text-shadow:0_2px_0_rgba(0,0,0,.7)]">Voici <span className="text-[#ffd84d]">pourquoi</span> ça marche</div>
@@ -71,8 +71,10 @@ export default async function Landing() {
         <p className="mt-4 max-w-2xl text-muted">Le montage, la retouche et l'export sont gratuits. Seule l'analyse par l'IA consomme des crédits : environ {s.rates.analysisPerMinute} par minute de rushs, remboursés si elle échoue.</p>
         <div className="mt-10 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           <div className="panel p-5"><p className="text-sm text-muted">Offre gratuite</p><p className="mt-2 text-3xl font-semibold">{free} crédits</p><p className="mt-2 text-sm text-muted">{s.plans.free?.storageGB} Go de stockage, export avec filigrane.</p></div>
-          {s.packs.map((p) => <div key={p.id} className="panel p-5"><p className="text-sm text-muted">{p.label}</p><p className="mt-2 text-3xl font-semibold">{p.price} {p.currency}</p><p className="mt-2 text-sm text-muted">{(p.price / p.credits * 100).toFixed(1)} {p.currency} les 100 crédits.</p></div>)}
+          {s.billing.oneTime && s.packs.map((p) => <div key={p.id} className="panel p-5"><p className="text-sm text-muted">{p.label} · paiement unique</p><p className="mt-2 text-3xl font-semibold">{p.price} {p.currency}</p><p className="mt-2 text-sm text-muted">{(p.price / p.credits * 100).toFixed(1)} {p.currency} les 100 crédits. Aucun renouvellement.</p></div>)}
+          {s.billing.subscriptions && s.subscriptionPlans.map((p) => <div key={p.id} className="panel border-accent/40 p-5"><p className="text-sm text-muted">{p.label} · par mois</p><p className="mt-2 text-3xl font-semibold">{p.price} {p.currency}</p><p className="mt-2 text-sm text-muted">{p.creditsPerMonth} crédits chaque mois, plus de stockage{s.plans[p.plan]?.watermark === false ? " et export sans filigrane" : ""}. Résiliable à tout moment.</p></div>)}
         </div>
+        <p className="mt-6 text-xs text-muted">Paiement sécurisé par Polar, notre revendeur officiel : la TVA et les factures sont gérées pour vous.</p>
       </section>
 
       <section className="mx-auto max-w-6xl px-5 pb-28 pt-8 text-center">

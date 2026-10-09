@@ -200,28 +200,54 @@ export const AiConfigS = z.strictObject({
   retryDelayMs: z.number().int().min(0).max(15000),
 });
 export type AiConfig = z.infer<typeof AiConfigS>;
+/** Génération de médias par IA (images, vidéos courtes). Modèles vérifiés dans la doc Gemini le 5 oct. 2026 ; modifiables dans l'admin. */
+export const GenConfigS = z.strictObject({
+  enabled: z.boolean(),
+  imageModel: z.string().min(3).max(80),            // Nano Banana 2 Lite : le moins cher, 1K seulement
+  videoModel: z.string().min(3).max(80),            // Veo 3.1 Fast
+  imageCredits: z.number().int().min(0).max(1000),  // crédits par image
+  videoEnabled: z.boolean(),
+  videoCreditsPerSec: z.number().int().min(0).max(1000),
+  maxVideoSec: z.number().int().min(4).max(8),      // Veo : 4, 6 ou 8 s
+  videoPaidOnly: z.boolean(),                       // vidéo réservée aux comptes ayant payé (évite les abus des crédits offerts)
+  dailyImages: z.number().int().min(0).max(500),
+  dailyVideos: z.number().int().min(0).max(100),
+});
+export type GenConfig = z.infer<typeof GenConfigS>;
 export const SettingsS = z.strictObject({
   ai: AiConfigS,
+  gen: GenConfigS,
   rates: z.strictObject({ analysisPerMinute: z.number().min(0), generation: z.number().min(0), storagePerGBMonth: z.number().min(0) }),
-  tokens: z.strictObject({ usdPerMTokIn: z.number().min(0), usdPerMTokOut: z.number().min(0), usdPerGBMonth: z.number().min(0), usdPerCredit: z.number().min(0) }),
+  tokens: z.strictObject({ usdPerMTokIn: z.number().min(0), usdPerMTokOut: z.number().min(0), usdPerGBMonth: z.number().min(0), usdPerCredit: z.number().min(0), usdPerImage: z.number().min(0), usdPerVideoSec: z.number().min(0) }),
   plans: z.record(z.string().max(20), PlanS),
-  packs: z.array(z.strictObject({ id: z.string().max(30), label: z.string().max(60), credits: z.number().int().min(1), price: z.number().min(0), currency: z.string().max(5) })).max(12),
+  /** Interrupteurs de paiement. oneTime = packs de crédits (par défaut ACTIF) ; subscriptions = abonnements mensuels (par défaut INACTIF). */
+  billing: z.strictObject({ oneTime: z.boolean(), subscriptions: z.boolean() }),
+  /** `price` n'est qu'un AFFICHAGE : le prix réellement facturé est celui du produit Polar (`productId`). Garder les deux identiques. */
+  packs: z.array(z.strictObject({ id: z.string().max(30), label: z.string().max(60), credits: z.number().int().min(1), price: z.number().min(0), currency: z.string().max(5), productId: z.string().max(80).optional() })).max(12),
+  subscriptionPlans: z.array(z.strictObject({ id: z.string().max(30), label: z.string().max(60), price: z.number().min(0), currency: z.string().max(5), creditsPerMonth: z.number().int().min(0), plan: z.string().max(20), productId: z.string().max(80).optional() })).max(6),
   inactivityDays: z.number().int().min(1).max(3650),
   disabledEffects: z.array(z.string().max(60)).max(500),
 });
 export type Settings = z.infer<typeof SettingsS>;
 export const DEFAULT_SETTINGS: Settings = {
   ai: { model: DEFAULT_AI_MODEL, fallbackModels: ["gemini-3.7-flash", "gemini-3.5-flash"], maxFallbacks: 2, retryDelayMs: 2500 },
+  gen: { enabled: true, imageModel: "gemini-3.1-flash-lite-image", videoModel: "veo-3.1-fast-generate-preview", imageCredits: 4, videoEnabled: true, videoCreditsPerSec: 12, maxVideoSec: 6, videoPaidOnly: true, dailyImages: 30, dailyVideos: 5 },
   rates: { analysisPerMinute: 10, generation: 25, storagePerGBMonth: 5 },
-  tokens: { usdPerMTokIn: 0.5, usdPerMTokOut: 3, usdPerGBMonth: 0.015, usdPerCredit: 0.02 },
+  tokens: { usdPerMTokIn: 0.5, usdPerMTokOut: 3, usdPerGBMonth: 0.015, usdPerCredit: 0.02, usdPerImage: 0.04, usdPerVideoSec: 0.15 },
   plans: {
     free: { storageGB: 2, dailyAnalyses: 3, watermark: true, maxProxyMinutes: 10, signupCredits: 30 },
     pro: { storageGB: 50, dailyAnalyses: 30, watermark: false, maxProxyMinutes: 30, signupCredits: 0 },
+    studio: { storageGB: 200, dailyAnalyses: 100, watermark: false, maxProxyMinutes: 60, signupCredits: 0 },
   },
+  billing: { oneTime: true, subscriptions: false },
   packs: [
-    { id: "p100", label: "100 crédits", credits: 100, price: 9, currency: "USD" },
-    { id: "p500", label: "500 crédits", credits: 500, price: 39, currency: "USD" },
+    { id: "p150", label: "150 crédits", credits: 150, price: 15, currency: "USD" },
+    { id: "p600", label: "600 crédits", credits: 600, price: 49, currency: "USD" },
     { id: "p2000", label: "2000 crédits", credits: 2000, price: 129, currency: "USD" },
+  ],
+  subscriptionPlans: [
+    { id: "pro_month", label: "Pro", price: 19, currency: "USD", creditsPerMonth: 250, plan: "pro" },
+    { id: "studio_month", label: "Studio", price: 49, currency: "USD", creditsPerMonth: 800, plan: "studio" },
   ],
   inactivityDays: 60,
   disabledEffects: [],
@@ -301,7 +327,14 @@ export function coerceParams(def: EffectDef, raw: Record<string, unknown> | unde
 }
 
 /* ────────────────────────── Sortie IA (7.4) : seule la partie qui lui appartient ────────────────────────── */
+/** Illustrations que l'IA PROPOSE (jamais générées sans confirmation de l'utilisateur). */
+export const SuggestionS = z.strictObject({
+  kind: z.enum(["image", "video"]), prompt: z.string().min(3).max(600), reason: z.string().max(200).optional(),
+  at: ms.optional(), aspect: z.enum(["9:16", "16:9", "1:1", "4:5"]).optional(),
+});
+export type Suggestion = z.infer<typeof SuggestionS>;
 export const AiOutputS = z.strictObject({
+  suggestions: z.array(SuggestionS).max(6).default([]),
   words: z.record(z.string(), z.array(WordS)).default({}),
   descs: z.record(z.string(), z.string().max(500)).optional(),
   grade: CompositionS.shape.grade,

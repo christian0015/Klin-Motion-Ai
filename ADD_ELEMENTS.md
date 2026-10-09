@@ -32,7 +32,7 @@ src/effects/index.ts            ← +1 import, +1 entrée dans EFFECTS
 ```
 
 À partir de là, **automatiquement** et sans autre modification :
-- l'effet apparaît dans l'éditeur (menus de l'Inspector filtrés par type, curseurs bornés générés depuis ses paramètres) ;
+- l'effet apparaît dans l'éditeur : onglet **Effets** (groupé par type, bouton « Appliquer » qui agit sur la sélection : clip, projet entier, transition entre deux clips, nouvelle couche…), menus « remplacer » de l'Inspector, curseurs bornés générés depuis ses paramètres ;
 - il est envoyé à l'IA de montage (catalogue généré depuis le registre) et son identifiant est ajouté à l'enum de sa réponse ;
 - il apparaît dans l'admin (interrupteur on/off) ;
 - le rendu (aperçu et export MP4) l'exécute.
@@ -307,7 +307,7 @@ float hash(vec2 p){ … }
 vec4 fx(vec2 uv);
 /* TON CODE : vec4 fx(vec2 uv) — retourne la couleur finale (mélange de tFrom et tTo) */
 ```
-`tMap` n'existe pas ici. Les paramètres viennent de `transitions[i].params`.
+`tMap` n'existe pas ici. Les paramètres viennent de `transitions[i].params`. Transitions fournies : `crossfade_v1` (fondu), `slide_v1` (glissement, paramètre `dir`), `glitch_cut` (glitch). Dans l'éditeur, une transition se choisit dans l'Inspector d'un clip de la piste principale (« Transition vers le clip suivant ») ou depuis l'onglet Effets.
 ```ts
 //src/effects/glitch_cut.ts  (corps)
 params: z.object({ intensity: z.number().min(0).max(2).default(1) }),

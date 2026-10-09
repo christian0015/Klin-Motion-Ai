@@ -25,6 +25,8 @@ export default function Legal() {
       <H id="conditions">Conditions d'utilisation</H>
       <p>Vous restez propriétaire de vos contenus et garantissez avoir les droits sur les vidéos, sons et textes que vous importez. Vous ne devez pas importer de contenu illicite. Nous pouvons suspendre un compte en cas d'abus (fraude, contenu illégal, usage excessif du service).</p>
       <p>Le montage proposé par l'IA est une base de travail : vous êtes responsable du résultat que vous publiez. Le service est fourni « en l'état » ; nous mettons tout en œuvre pour sa disponibilité sans pouvoir la garantir.</p>
+      <p><b>Paiement.</b> Les paiements sont traités par Polar, notre revendeur officiel (« Merchant of Record ») : c'est Polar qui encaisse, émet la facture et gère la TVA. Nous ne voyons ni ne stockons jamais vos données de carte. Les packs de crédits sont des <b>paiements uniques</b> : aucun prélèvement ultérieur n'est effectué sans votre accord.</p>
+      <p><b>Abonnements (lorsqu'ils sont proposés).</b> Un abonnement est mensuel et se renouvelle automatiquement jusqu'à ce que vous le résiliiez, à tout moment, depuis « Factures et gestion de l'abonnement » dans votre tableau de bord. Après résiliation, votre offre reste active jusqu'à la fin de la période déjà payée. Si nous cessons de proposer les abonnements, les abonnés actuels conservent leur offre jusqu'à la fin de leur période payée et ne sont simplement pas renouvelés. Les crédits mensuels d'un abonnement n'expirent pas.</p>
       <p>Les crédits servent à payer l'analyse par l'IA. Ils n'ont pas de valeur monétaire, ne sont pas transférables et ne sont pas échangeables contre de l'argent.</p>
 
       <H id="remboursements">Remboursements</H>

@@ -13,6 +13,8 @@ import { ApiError, api } from "@/lib/media";
 
 interface Me { id: string; name?: string; email?: string; image?: string; plan: string; role: string; credits: number; storageBytes: number; prefs: { platform?: string; lang?: string };
   limits: { storageGB: number; dailyAnalyses: number; analysesToday: number; watermark: boolean }; packs: { id: string; label: string; credits: number; price: number; currency: string }[];
+  provider: "polar" | "manual"; subscriptionPlans: { id: string; label: string; price: number; currency: string; creditsPerMonth: number; plan: string }[];
+  subscription: { id: string; itemId: string; plan: string; status: "active" | "ended"; periodEnd?: string; cancelAtPeriodEnd: boolean } | null;
   rates: { analysisPerMinute: number }; ledger: { id: string; kind: string; action: string; credits: number; costUsd?: number; tokensIn?: number; tokensOut?: number; bytes?: number; ts: string }[] }
 interface Proj { id: string; name: string; updatedAt: string; thumb?: string; brief: { platform: string } }
 
@@ -28,6 +30,12 @@ export default function Dashboard() {
     catch (e) { if (e instanceof ApiError && e.status === 401) router.replace("/"); else setErr(e instanceof ApiError && e.status === 429 ? `Trop de requêtes, réessayez dans ${e.retryAfter || 30} s.` : (e as Error).message); }
   }, [router]);
   useEffect(() => { void load(); }, [load]);
+  // Retour du paiement : les crédits arrivent par webhook, quelques secondes après. On actualise le solde plusieurs fois.
+  useEffect(() => {
+    if (new URLSearchParams(location.search).get("checkout") !== "success") return;
+    setMsg("Paiement reçu, merci ! Vos crédits arrivent dans quelques secondes."); history.replaceState(null, "", "/dashboard");
+    let n = 0; const id = setInterval(() => { void load(); if (++n >= 6) clearInterval(id); }, 3000); return () => clearInterval(id);
+  }, [load]);
 
   const create = async (example = false) => {
     setBusy(true);
@@ -36,7 +44,9 @@ export default function Dashboard() {
   };
   const remove = async (p: Proj) => { if (!confirm(`Supprimer « ${p.name} » et ses fichiers ? Cette action est définitive.`)) return; try { await api(`projects/${p.id}`, "DELETE"); setProjects((l) => l?.filter((x) => x.id !== p.id) ?? null); } catch (e) { setErr((e as Error).message); } };
   const savePrefs = async (patch: object) => { try { await api("me", "PATCH", patch); setMsg("Préférences enregistrées."); void load(); } catch (e) { setErr((e as Error).message); } };
-  const buy = async (packId: string) => { try { await api("billing/checkout", "POST", { packId }); setMsg("Le paiement en ligne n'est pas encore ouvert : écrivez-nous avec le pack souhaité et nous créditons votre compte."); } catch (e) { setErr((e as Error).message); } };
+  /** Redirige vers la page de paiement hébergée par Polar (aucune donnée de carte ne passe par nous). */
+  const buy = async (type: "pack" | "subscription", id: string) => { setErr(""); try { const r = await api("billing/checkout", "POST", { type, id }); if (r.url) location.href = r.url; } catch (e) { setErr((e as Error).message); } };
+  const portal = async () => { setErr(""); try { const r = await api("billing/portal", "POST", {}); if (r.url) location.href = r.url; } catch (e) { setErr((e as Error).message); } };
   const deleteAccount = async () => { if (prompt("Cette action supprime votre compte, vos projets et vos fichiers. Tapez SUPPRIMER pour confirmer.") !== "SUPPRIMER") return; try { await api("me", "DELETE"); location.href = "/"; } catch (e) { setErr((e as Error).message); } };
   const loadMore = async () => { const r = await api(`projects?page=${page + 1}`); setProjects((l) => [...(l ?? []), ...r.items]); setMore(r.more); setPage(page + 1); };
 
@@ -83,7 +93,16 @@ export default function Dashboard() {
             <>
               <p className="mt-3 text-4xl font-semibold">{me.credits} <span className="text-base font-normal text-muted">crédits</span></p>
               <p className="mt-1 text-sm text-muted">Une analyse coûte environ {me.rates.analysisPerMinute} crédits par minute de rushs. Les crédits non utilisés d'une analyse échouée sont remboursés.</p>
-              <div className="mt-4 flex flex-wrap gap-2">{me.packs.map((p) => <button key={p.id} className="btn" onClick={() => buy(p.id)}>{p.label} · {p.price} {p.currency}</button>)}</div>
+              {me.packs.length > 0 && <div className="mt-4"><p className="mb-1.5 text-xs text-muted">Acheter des crédits (paiement unique, sans renouvellement)</p><div className="flex flex-wrap gap-2">{me.packs.map((p) => <button key={p.id} className="btn" onClick={() => buy("pack", p.id)}>{p.label} · {p.price} {p.currency}</button>)}</div></div>}
+              {me.subscription && me.subscription.status === "active" && (
+                <div className="mt-4 rounded-lg border border-line p-3 text-sm">
+                  <p className="font-medium">Abonnement <span className="capitalize">{me.subscription.plan}</span></p>
+                  <p className="mt-0.5 text-xs text-muted">{me.subscription.cancelAtPeriodEnd ? `Ne sera pas renouvelé : votre offre reste active jusqu'au ${me.subscription.periodEnd ? new Date(me.subscription.periodEnd).toLocaleDateString("fr-FR") : "terme de la période payée"}.` : `Renouvelé le ${me.subscription.periodEnd ? new Date(me.subscription.periodEnd).toLocaleDateString("fr-FR") : "mois prochain"}.`}</p>
+                </div>
+              )}
+              {me.subscriptionPlans.length > 0 && !(me.subscription?.status === "active") && <div className="mt-4"><p className="mb-1.5 text-xs text-muted">Abonnements mensuels (résiliables à tout moment)</p><div className="flex flex-wrap gap-2">{me.subscriptionPlans.map((p) => <button key={p.id} className="btn" onClick={() => buy("subscription", p.id)}>{p.label} · {p.price} {p.currency}/mois · {p.creditsPerMonth} crédits</button>)}</div></div>}
+              {me.provider === "polar" && <button className="btn btn-ghost mt-3 !px-0 text-xs text-muted underline" onClick={portal}>Factures et gestion de l'abonnement</button>}
+              {me.provider === "manual" && me.packs.length > 0 && <p className="mt-3 text-xs text-warn">Le paiement en ligne n'est pas encore activé sur cette plateforme.</p>}
               <h3 className="mt-6 text-sm font-semibold">Historique</h3>
               <ul className="mt-2 divide-y divide-line text-sm">
                 {me.ledger.filter((l) => l.credits !== 0 || l.action === "analysis").slice(0, 12).map((l) => (

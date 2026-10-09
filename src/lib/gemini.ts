@@ -7,7 +7,10 @@
  * Ne contient PAS : crédits (billing.ts), accès base, routes. La sortie de Gemini n'est JAMAIS exécutée :
  * seule la validation zod + l'enum du registre la fait entrer dans le projet (anti-injection de prompt).
  */
-import { GoogleGenAI, FileState, MediaResolution } from "@google/genai";
+import { promises as fsp } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { GoogleGenAI, FileState, GenerateVideosOperation, MediaResolution } from "@google/genai";
 import { z } from "zod";
 import { activeEffects, registry } from "@/effects";
 import {
@@ -49,7 +52,7 @@ export function catalogForPrompt(disabled: readonly string[] = []): string {
 /** Taille approximative du catalogue en tokens (affichée dans l'admin). */
 export const catalogTokens = (disabled: readonly string[] = []) => Math.ceil(catalogForPrompt(disabled).length / 3.6);
 
-export function systemPrompt(disabled: readonly string[]): string {
+export function systemPrompt(disabled: readonly string[], suggest = false): string {
   return `Tu es le directeur artistique d'un éditeur vidéo pour réseaux sociaux (speech-to-edit : une personne qui parle, enrichie d'effets, de sous-titres cinétiques, d'images, de musique et d'overlays).
 Tu reçois des MÉDIAS (vidéos en proxys basse résolution, IMAGES, SONS), un BRIEF et un CATALOGUE d'effets. Tu produis UNIQUEMENT un JSON de composition.
 RÈGLES :
@@ -59,8 +62,8 @@ RÈGLES :
 - IMAGES : place-les dans une piste kind "video" SANS magnetic, clip { id, asset:<id image>, src:[0, durée_ms], at, dur, fit:"contain" (logo, capture, photo entière) ou "cover" (plein cadre), transform, motion }. Une image dure ce que tu décides (2000 à 5000 ms en général).
 - SONS / MUSIQUE : piste kind "audio", clip { id, asset:<id son>, src:[début,fin], at, dur, gain (0 à 1 ; une musique sous une voix : 0.15 à 0.3), fade:[entréeMs, sortieMs] }.
 - Effets AUDIO (kind audio_fx) : champ "afx":[{id, params}] sur un clip vidéo (sa voix) ou audio. Reste sobre : un effet audio bien placé suffit.
-- Tu n'es pas obligé d'utiliser tous les médias : n'utilise que ceux qui servent le brief.
-- Pour tout texte ou effet synchronisé sur la parole, utilise "anchor": { clip, words:[i,j] } avec des INDEX de mots (jamais des ms). Index = position dans words de la vidéo.
+- Tu n'es pas obligé d'utiliser tous les médias : n'utilise que ceux qui servent le brief. Ne place JAMAIS un média qui n'existe pas dans la liste fournie.
+${suggest ? `- SUGGESTIONS : si une idée dite à l'oral gagnerait à être illustrée et qu'aucune image fournie ne convient, propose-la dans "suggestions" (4 maximum) : { kind:"image", prompt:<description visuelle précise EN ANGLAIS, sans texte écrit, sans personne réelle identifiable, sans marque>, reason:<pourquoi, en français, 1 phrase>, at:<instant approximatif en ms sur la timeline>, aspect }. Ce ne sont que des propositions : l'utilisateur choisit ce qui est généré.\n` : ""}- Pour tout texte ou effet synchronisé sur la parole, utilise "anchor": { clip, words:[i,j] } avec des INDEX de mots (jamais des ms). Index = position dans words de la vidéo.
 - Sous-titres : piste kind "caption", clip { id, from:<id du clip vidéo>, style:<caption_style du catalogue> }.
 - Utilise EXCLUSIVEMENT les identifiants du catalogue (copie exacte). Respecte les bornes des paramètres.
 - Reste sobre : quelques effets bien placés valent mieux qu'une surcharge. Chaque id (piste, clip) est unique et court.
@@ -70,7 +73,7 @@ ${catalogForPrompt(disabled)}`;
 }
 
 /* ───── Schéma de réponse SIMPLIFIÉ (limites de complexité), enum tiré du registre ───── */
-export function responseSchema(disabled: readonly string[]) {
+export function responseSchema(disabled: readonly string[], suggest = false) {
   const ids = (k?: string[]) => activeEffects(disabled).filter((e) => !k || k.includes(e.kind)).map((e) => e.id);
   const e = (k: string[]) => ({ type: "string", enum: ids(k).length ? ids(k) : ["none"] });
   const num = { anyOf: [{ type: "number" }, { type: "object", properties: { kf: { type: "array", items: { type: "array", items: { type: ["number", "string"] } } } }, required: ["kf"] }] };
@@ -100,6 +103,7 @@ export function responseSchema(disabled: readonly string[]) {
       descs: { type: "object", additionalProperties: { type: "string" } },
       grade: { type: "object", properties: { lut: e(["lut"]), amount: num }, required: ["lut", "amount"] },
       tracks: { type: "array", items: { type: "object", properties: { id: { type: "string" }, kind: { type: "string", enum: ["video", "adjustment", "overlay", "text", "caption", "shape", "audio"] }, magnetic: { type: "boolean" }, clips: { type: "array", items: clip } }, required: ["id", "kind", "clips"] } },
+      ...(suggest ? { suggestions: { type: "array", items: { type: "object", properties: { kind: { type: "string", enum: ["image", "video"] }, prompt: { type: "string" }, reason: { type: "string" }, at: { type: "integer" }, aspect: { type: "string", enum: ["9:16", "16:9", "1:1", "4:5"] } }, required: ["kind", "prompt"] } } } : {}),
       transitions: { type: "array", items: { type: "object", properties: { between: { type: "array", items: { type: "string" } }, effect: e(["transition"]), dur: { type: "integer" }, params: { type: "object", additionalProperties: true } }, required: ["between", "effect", "dur"] } },
     },
     required: ["words", "tracks", "transitions"],
@@ -215,7 +219,7 @@ export function friendlyError(e: unknown): string {
 
 /* ───── Appel ───── */
 export interface MediaInput { id: string; type: "video" | "image" | "audio"; desc?: string; name?: string; w?: number; h?: number; dur?: number; fps?: number; rot?: number; hasAudio?: boolean; proxy: Blob }
-export interface GeminiInput { media: MediaInput[]; brief: Brief; disabled: readonly string[]; base: Composition; ai: AiConfig }
+export interface GeminiInput { media: MediaInput[]; brief: Brief; disabled: readonly string[]; base: Composition; ai: AiConfig; suggest?: boolean }
 export interface GeminiResult { ai: AiOutput; raw: string; model: string; tokensIn: number; tokensOut: number; latencyMs: number; attempts: number; log: AttemptLog[]; audioLimited: boolean }
 const sleep = defaultSleep;
 const mimeOf = (m: MediaInput) => (m.proxy.type && m.proxy.type.startsWith(`${m.type}/`) ? m.proxy.type : m.type === "video" ? "video/mp4" : m.type === "image" ? "image/jpeg" : "audio/wav");
@@ -247,7 +251,7 @@ export async function callGemini(input: GeminiInput, onProgress?: (p: number, m:
   const audioCount = items.filter((x) => x.type === "audio").length;
   const partsFor = (maxAudio: number) => { let n = 0; return [...items.filter((x) => x.type !== "audio" || ++n <= maxAudio).flatMap((x) => x.parts), briefPart]; };
 
-  const sys = systemPrompt(input.disabled), schema = responseSchema(input.disabled);
+  const sys = systemPrompt(input.disabled, !!input.suggest), schema = responseSchema(input.disabled, !!input.suggest);
   let raw = "", tokensIn = 0, tokensOut = 0, lastErr = "", attempts = 0, model = cfg.model, audioLimit = Infinity;
   const log: AttemptLog[] = [];
   for (let n = 0; n <= ANALYSIS.retries; n++) {
@@ -280,4 +284,44 @@ export async function callGemini(input: GeminiInput, onProgress?: (p: number, m:
   const err = new Error(`Réponse IA invalide : ${lastErr}`) as Error & { raw?: string; tokensIn?: number; tokensOut?: number };
   err.raw = raw; err.tokensIn = tokensIn; err.tokensOut = tokensOut;
   throw err;
+}
+
+/* ───── Génération de médias (images, vidéos courtes) ───── */
+export class GenError extends Error { constructor(msg: string) { super(msg); } }
+const SAFETY_MSG = "Google a refusé cette demande (règles de sécurité). Reformulez sans personne réelle identifiable ni contenu sensible : vos crédits sont remboursés.";
+const isSafety = (e: unknown) => /safety|blocked|prohibited|policy|rai/i.test(String((e as any)?.message ?? ""));
+const genClient = () => { const key = process.env.GEMINI_API_KEY; if (!key) throw new GenError("GEMINI_API_KEY manquante"); return new GoogleGenAI({ apiKey: key }); };
+
+/** Image (JPEG 1K) via l'API Interactions. Toutes les images générées par Google portent un filigrane invisible SynthID. */
+export async function generateImage(model: string, prompt: string, aspect: string, cfg: AiConfig): Promise<{ data: Buffer; mime: string }> {
+  const ai = genClient();
+  try {
+    const it = await retryTransient(cfg, () => ai.interactions.create({ model, input: prompt, response_format: { type: "image", mime_type: "image/jpeg", aspect_ratio: aspect, image_size: "1K" } }));
+    const img = it.output_image;
+    if (!img?.data) throw new GenError(SAFETY_MSG);
+    return { data: Buffer.from(img.data, "base64"), mime: "image/jpeg" };
+  } catch (e) { if (e instanceof GenError) throw e; if (isSafety(e)) throw new GenError(SAFETY_MSG); throw e; }
+}
+/** Lance une génération vidéo (opération longue : 1 à quelques minutes) et renvoie son identifiant. */
+export async function startVideo(model: string, prompt: string, aspect: "9:16" | "16:9", seconds: number, cfg: AiConfig): Promise<string> {
+  const ai = genClient();
+  try {
+    const op = await retryTransient(cfg, () => ai.models.generateVideos({ model, prompt, config: { aspectRatio: aspect, durationSeconds: seconds, resolution: "720p", numberOfVideos: 1 } }));
+    if (!op.name) throw new Error("Veo n'a pas renvoyé d'identifiant d'opération.");
+    return op.name;
+  } catch (e) { if (isSafety(e)) throw new GenError(SAFETY_MSG); throw e; }
+}
+export type VideoPoll = { state: "running" } | { state: "failed"; message: string } | { state: "done"; data: Buffer; mime: string };
+/** Un seul contrôle de l'opération (appelé à chaque interrogation du client : pas de tâche de fond qui dépasse la durée maximale). */
+export async function pollVideo(opName: string): Promise<VideoPoll> {
+  const ai = genClient(), op = new GenerateVideosOperation(); op.name = opName;
+  const r = await ai.operations.getVideosOperation({ operation: op });
+  if (!r.done) return { state: "running" };
+  if (r.error) return { state: "failed", message: isSafety(JSON.stringify(r.error)) ? SAFETY_MSG : "La génération vidéo a échoué." };
+  const video = r.response?.generatedVideos?.[0]?.video;
+  if (!video) return { state: "failed", message: r.response?.raiMediaFilteredCount ? SAFETY_MSG : "Aucune vidéo n'a été produite." };
+  const tmp = path.join(os.tmpdir(), `gen-${Date.now()}-${Math.random().toString(36).slice(2)}.mp4`);
+  await ai.files.download({ file: video, downloadPath: tmp });
+  const data = await fsp.readFile(tmp); await fsp.unlink(tmp).catch(() => {});
+  return { state: "done", data, mime: "video/mp4" };
 }

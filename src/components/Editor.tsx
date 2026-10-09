@@ -13,23 +13,25 @@ import { nanoid } from "nanoid";
 import Preview from "./Preview";
 import Timeline from "./Timeline";
 import Inspector from "./Inspector";
+import EffectsPanel from "./EffectsPanel";
 import { useEditor, type VersionMeta } from "@/lib/store";
 import { ApiError, api, fingerprint, getFile, hasLocal, importRush, makeAudioProxy, makeImageProxy, makeProxy, probe, remember, uploadBlob } from "@/lib/media";
 import { exportMp4 } from "@/lib/render";
+import { GenerateButton, Suggestions, type GenInfo } from "./GeneratePanel";
 import { layoutDoc, validate } from "@/lib/engine";
 import { getEffect } from "@/effects";
 import type { Asset, Brief, Composition } from "@/lib/schema";
 
 type MediaAsset = Extract<Asset, { type: "video" | "image" | "audio" }>;
 
-interface Me { credits: number; limits: { watermark: boolean }; analysis: { proxyShortSide: number; proxyFps: number; imageProxySide: number }; disabledEffects: string[] }
+interface Me { gen?: GenInfo; credits: number; limits: { watermark: boolean }; analysis: { proxyShortSide: number; proxyFps: number; imageProxySide: number }; disabledEffects: string[] }
 interface Initial { id: string; name: string; rev: number; brief: Brief; doc: Composition }
 
 export default function Editor({ initial }: { initial: Initial }) {
   // Abonnement CIBLÉ : surtout pas au store entier (le temps `t` change à chaque image et ferait recréer l'aperçu).
   const s = useEditor(useShallow((st) => ({ doc: st.doc, save: st.save, name: st.name, brief: st.brief, status: st.status, progress: st.progress, message: st.message, sync: st.sync, versions: st.versions, past: st.past, future: st.future, disabled: st.disabled, projectId: st.projectId, problems: st.problems })));
   const [me, setMe] = useState<Me | null>(null);
-  const [left, setLeft] = useState<"rushs" | "brief" | "history">("rushs");
+  const [left, setLeft] = useState<"rushs" | "effects" | "brief" | "history">("rushs");
   const [toast, setToast] = useState<{ kind: "ok" | "err"; msg: string } | null>(null);
   const [confirm, setConfirm] = useState<{ credits: number; minutes: number; balance: number; tokens: number } | null>(null);
   const abort = useRef<AbortController | null>(null);
@@ -183,7 +185,7 @@ export default function Editor({ initial }: { initial: Initial }) {
         if (j.status === "failed") throw new Error(j.error ?? "L'analyse a échoué : crédits remboursés.");
         if (j.status === "done") {
           const v = await api(`projects/${st.projectId}/versions/${j.versionId}`);
-          st.replaceDoc(v.doc, "Montage IA");
+          st.replaceDoc(v.doc, "Montage IA"); useEditor.getState().setSuggestions(v.meta?.suggestions ?? []);
           useEditor.getState().setCompare({ a: before, b: v.doc, labelA: "Avant l'IA", labelB: "Après l'IA" });
           st.setStatus("ready"); void st.loadVersions(); api<Me>("me").then(setMe).catch(() => {});
           say(j.fallback ? "err" : "ok", j.fallback ? j.message : "Montage prêt. Comparez avant / après dans l'historique."); break;
@@ -252,18 +254,21 @@ export default function Editor({ initial }: { initial: Initial }) {
       <div className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[auto_minmax(0,1fr)_minmax(220px,36%)] lg:grid-cols-[300px_minmax(0,1fr)_320px] lg:grid-rows-[minmax(0,1fr)_minmax(220px,36%)]">
         {/* gauche */}
         <aside className="min-h-0 overflow-y-auto border-b border-line bg-panel lg:row-span-1 lg:border-b-0 lg:border-r">
-          <div className="flex border-b border-line text-sm">{([["rushs", "Médias"], ["brief", "Brief"], ["history", "Historique"]] as const).map(([k, l]) => <button key={k} onClick={() => setLeft(k)} className={`flex-1 py-2 ${left === k ? "border-b-2 border-accent" : "text-muted"}`}>{l}</button>)}</div>
+          <div className="flex border-b border-line text-sm">{([["rushs", "Médias"], ["effects", "Effets"], ["brief", "Brief"], ["history", "Historique"]] as const).map(([k, l]) => <button key={k} onClick={() => setLeft(k)} className={`flex-1 py-2 ${left === k ? "border-b-2 border-accent" : "text-muted"}`}>{l}</button>)}</div>
           {left === "rushs" && (
             <div className="space-y-3 p-3">
               <label className="btn btn-primary w-full cursor-pointer">Ajouter des médias<input type="file" accept="video/*,image/*,audio/*" multiple hidden onChange={(e) => { void addMedia(e.target.files); e.target.value = ""; }} /></label>
               <p className="text-[11px] text-muted">Vidéos, images (PNG, JPEG, WebP, GIF) et sons (MP3, WAV, M4A, OGG).</p>
+              {me?.gen && <GenerateButton gen={me.gen} credits={me.credits} say={say} onDone={() => api<Me>("me").then(setMe).catch(() => {})} />}
+              {me?.gen && <Suggestions gen={me.gen} credits={me.credits} say={say} onDone={() => api<Me>("me").then(setMe).catch(() => {})} />}
               {!mediaAssets.length && <p className="font-display text-2xl text-muted">Déposez vos vidéos, images et sons pour commencer.</p>}
               {mediaAssets.map(([id, a]) => {
                 const sy = s.sync[id], fp = (a as { fp?: string }).fp ?? "", example = fp.startsWith("example-");
                 const mb = (a as { bytes?: number }).bytes ? ` · ${((a as { bytes: number }).bytes / 1048576).toFixed(1)} Mo` : "";
                 const meta = a.type === "audio" ? `${(a.dur / 1000).toFixed(1)} s${mb}` : a.type === "image" ? `${a.w}×${a.h}${mb}` : `${(a.dur / 1000).toFixed(1)} s · ${a.w}×${a.h}${mb}`;
                 return (
-                  <div key={id} className="rounded-lg border border-line p-2 text-xs">
+                  <div key={id} className="cursor-grab rounded-lg border border-line p-2 text-xs" draggable title="Glissez ce média sur une piste de la timeline"
+                    onDragStart={(e) => { e.dataTransfer.setData("application/x-motionia-asset", id); e.dataTransfer.effectAllowed = "copy"; useEditor.getState().setDragAsset(id); }} onDragEnd={() => useEditor.getState().setDragAsset(null)}>
                     <p className="truncate font-medium" title={a.name}><span className="chip mr-1.5">{a.type === "video" ? "Vidéo" : a.type === "image" ? "Image" : "Audio"}</span>{a.name ?? id}</p>
                     <p className="mt-0.5 text-muted">{meta}</p>
                     <input className="field mt-1.5 !py-1" placeholder="Description (optionnel, lue par l'IA)" defaultValue={a.desc ?? ""} maxLength={500} onBlur={(e) => act.apply("Description du média", (d) => { const x = d.assets[id]; if (x && (x.type === "video" || x.type === "image" || x.type === "audio")) x.desc = e.target.value || undefined; })} />
@@ -289,6 +294,7 @@ export default function Editor({ initial }: { initial: Initial }) {
               )}
             </div>
           )}
+          {left === "effects" && <EffectsPanel />}
           {left === "brief" && <BriefPanel />}
           {left === "history" && (
             <div className="space-y-2 p-3 text-sm">

@@ -67,7 +67,7 @@ function EffectPicker({ kind, disabled, onPick, placeholder }: { kind: EffectKin
 
 export default function Inspector() {
   const doc = useEditor((s) => s.doc), sel = useEditor((s) => s.selection), t = useEditor((s) => s.t), disabled = useEditor((s) => s.disabled);
-  const [tab, setTab] = useState<"props" | "json">("props"), [note, setNote] = useState("");
+  const [tab, setTab] = useState<"props" | "json">("props");
   const act = useEditor.getState();
   const layout = useMemo(() => layoutDoc(doc), [doc]);
   const p = sel ? layout.byId[sel] : undefined;
@@ -98,31 +98,6 @@ export default function Inspector() {
               {clip.anchor && <p className="mt-1 text-xs text-muted">Ancré aux mots {clip.anchor.words[0]}–{clip.anchor.words[1]} de {clip.anchor.clip}.</p>}
             </Section>
 
-            {(track!.kind === "video" || track!.kind === "audio") && (
-              <Section title="Média du clip">
-                <select className="field !py-1 text-xs" value={clip.asset} aria-label="Remplacer le média de ce clip" onChange={(e) => { const r = act.replaceClipAsset(clip.id, e.target.value); setNote(r.msg ?? ""); }}>
-                  {String(clip.asset).startsWith("sfx:") && <option value={clip.asset}>{clip.asset}</option>}
-                  {Object.entries(doc.assets).filter(([, a]) => (track!.kind === "audio" ? a.type === "audio" : a.type === "video" || a.type === "image")).map(([id, a]) => <option key={id} value={id}>{(a as { name?: string }).name ?? id} · {a.type}</option>)}
-                </select>
-                <p className="mt-1 text-[11px] text-muted">Remplace le média en gardant la position, les effets et la durée. Pour un autre fichier, ajoutez-le d'abord dans l'onglet Médias.</p>
-                {note && <p className="mt-1 text-[11px] text-warn">{note}</p>}
-              </Section>
-            )}
-            {p.magnetic && (() => {
-              const clips = doc.tracks[p.trackIdx].clips, next = clips[clips.findIndex((c) => c.id === p.id) + 1];
-              if (!next) return null;
-              const tr = doc.transitions.find((x) => x.between[0] === p.id && x.between[1] === next.id), list = activeEffects(disabled, "transition");
-              return (
-                <Section title="Transition vers le clip suivant">
-                  <select className="field !py-1 text-xs" value={tr?.effect ?? ""} aria-label="Transition vers le clip suivant" onChange={(e) => act.setTransition(p.id, e.target.value || null, tr?.dur ?? 400)}>
-                    <option value="">Aucune (coupe franche)</option>
-                    {tr && !list.some((e) => e.id === tr.effect) && <option value={tr.effect}>{tr.effect} (indisponible)</option>}
-                    {list.map((e) => <option key={e.id} value={e.id} title={e.describe}>{e.id}</option>)}
-                  </select>
-                  {tr && <label className="mt-2 flex items-center gap-2 text-xs"><span className="w-20 text-muted">durée (ms)</span><input type="number" min={50} max={2000} step={50} className="field !w-24 !py-0.5 font-mono" value={tr.dur} onChange={(e) => act.setTransition(p.id, tr.effect, Math.min(2000, Math.max(50, +e.target.value)))} /></label>}
-                </Section>
-              );
-            })()}
             {track!.kind === "video" && (
               <Section title={isImage ? "Image" : "Vidéo"}>
                 {isImage ? (
@@ -142,7 +117,7 @@ export default function Inspector() {
               <Section title="Effets audio">
                 {(clip.afx ?? []).map((f: any, i: number) => (
                   <div key={i} className="mb-3 rounded-lg border border-line p-2">
-                    <div className="mb-1.5 flex items-center justify-between gap-2 text-xs font-medium"><ReplaceSelect kind="audio_fx" value={f.id} disabled={disabled} label="Remplacer cet effet audio" onPick={(id) => mut((c) => { c.afx[i] = { id }; }, "Remplacer l'effet audio")} /><button className="text-muted hover:text-bad" onClick={() => mut((c) => { c.afx.splice(i, 1); if (!c.afx.length) delete c.afx; }, "Retirer l'effet audio")}>Retirer</button></div>
+                    <div className="mb-1.5 flex items-center justify-between text-xs font-medium">{f.id}<button className="text-muted hover:text-bad" onClick={() => mut((c) => { c.afx.splice(i, 1); if (!c.afx.length) delete c.afx; }, "Retirer l'effet audio")}>Retirer</button></div>
                     {registry.get(f.id) ? <ParamFields def={registry.get(f.id)!} values={f.params} local={local} animatable={false} onSet={(k, v) => mut((c) => { c.afx[i].params = { ...(c.afx[i].params ?? {}), [k]: v }; })} /> : <p className="text-xs text-warn">Effet audio inconnu ou désactivé : ignoré.</p>}
                   </div>
                 ))}
@@ -168,7 +143,7 @@ export default function Inspector() {
               <Section title="Overlay">
                 <label className="mb-2 flex items-center gap-2 text-xs"><span className="w-20 text-muted">fusion</span>
                   <select className="field !py-0.5" value={clip.blend ?? "normal"} onChange={(e) => mut((c) => { c.blend = e.target.value; })}>{["normal", "add"].map((b) => <option key={b}>{b}</option>)}</select></label>
-                <label className="flex items-center gap-2 text-xs"><span className="w-20 text-muted">effet</span><ReplaceSelect kind="overlay" value={clip.effect} disabled={disabled} label="Remplacer l'overlay" onPick={(id) => mut((c) => { c.effect = id; c.params = {}; }, "Remplacer l'overlay")} /></label>
+                <EffectPicker kind="overlay" disabled={disabled} placeholder={clip.effect} onPick={(id) => mut((c) => { c.effect = id; c.params = {}; })} />
                 {registry.get(clip.effect) && <div className="mt-2"><ParamFields def={registry.get(clip.effect)!} values={clip.params} local={local} onSet={(k, v) => setParam("params", 0, k, v)} /></div>}
               </Section>
             )}
@@ -204,7 +179,7 @@ export default function Inspector() {
               <Section title="Effets d'image">
                 {(clip.fx ?? []).map((f: any, i: number) => (
                   <div key={i} className="mb-3 rounded-lg border border-line p-2">
-                    <div className="mb-1.5 flex items-center justify-between gap-2 text-xs font-medium"><ReplaceSelect kind="fx" value={f.id} disabled={disabled} label="Remplacer cet effet" onPick={(id) => mut((c) => { c.fx[i] = { id }; }, "Remplacer l'effet")} /><button className="text-muted hover:text-bad" onClick={() => mut((c) => { c.fx.splice(i, 1); }, "Retirer l'effet")}>Retirer</button></div>
+                    <div className="mb-1.5 flex items-center justify-between text-xs font-medium">{f.id}<button className="text-muted hover:text-bad" onClick={() => mut((c) => { c.fx.splice(i, 1); }, "Retirer l'effet")}>Retirer</button></div>
                     {registry.get(f.id) ? <ParamFields def={registry.get(f.id)!} values={f.params} local={local} onSet={(k, v) => setParam("fx", i, k, v)} /> : <p className="text-xs text-warn">Effet inconnu ou désactivé : ignoré au rendu.</p>}
                   </div>
                 ))}
@@ -215,7 +190,7 @@ export default function Inspector() {
               <Section title="Déformation (mesh)">
                 {clip.mesh ? (
                   <>
-                    <div className="mb-1.5 flex items-center justify-between gap-2 text-xs font-medium"><ReplaceSelect kind="mesh" value={clip.mesh.id} disabled={disabled} label="Remplacer cette déformation" onPick={(id) => mut((c) => { c.mesh = { id }; }, "Remplacer la déformation")} /><button className="text-muted hover:text-bad" onClick={() => mut((c) => { delete c.mesh; }, "Retirer la déformation")}>Retirer</button></div>
+                    <div className="mb-1.5 flex items-center justify-between text-xs font-medium">{clip.mesh.id}<button className="text-muted hover:text-bad" onClick={() => mut((c) => { delete c.mesh; }, "Retirer la déformation")}>Retirer</button></div>
                     {registry.get(clip.mesh.id) ? <ParamFields def={registry.get(clip.mesh.id)!} values={clip.mesh.params} local={local} onSet={(k, v) => setParam("mesh", 0, k, v)} /> : <p className="text-xs text-warn">Déformation inconnue ou désactivée.</p>}
                   </>
                 ) : <EffectPicker kind="mesh" disabled={disabled} placeholder="+ Ajouter une déformation" onPick={(id) => mut((c) => { c.mesh = { id }; }, "Ajouter une déformation")} />}
@@ -226,17 +201,6 @@ export default function Inspector() {
         )}
       </div>
     </div>
-  );
-}
-
-/** Liste déroulante « remplacer » : montre l'effet actuel et propose les autres du même type. */
-function ReplaceSelect({ kind, value, disabled, onPick, label }: { kind: EffectKind; value: string; disabled: string[]; onPick: (id: string) => void; label: string }) {
-  const list = activeEffects(disabled, kind);
-  return (
-    <select className="field !w-auto !max-w-[11rem] !py-0.5 font-mono !text-[11px]" value={value} aria-label={label} title={label} onChange={(e) => onPick(e.target.value)}>
-      {!list.some((e) => e.id === value) && <option value={value}>{value}{registry.has(value) ? " (ancien)" : " (inconnu)"}</option>}
-      {list.map((e) => <option key={e.id} value={e.id}>{e.id}</option>)}
-    </select>
   );
 }
 

@@ -34,6 +34,7 @@ const userSchema = S({
   prefs: { type: Schema.Types.Mixed, default: {} },
   plan: { type: String, default: "free" }, role: { type: String, enum: ["user", "admin"], default: "user" },
   credits: { type: Number, default: 0 }, storageBytes: { type: Number, default: 0 },
+  subscription: { type: Schema.Types.Mixed, default: null },   // { id, itemId, plan, status: active|ended, periodEnd, cancelAtPeriodEnd, lastEventAt }
   suspended: { type: Boolean, default: false }, sessionVersion: { type: Number, default: 0 },
   lastActiveAt: Date, createdAt: { type: Date, default: Date.now },
 }, { strict: false });
@@ -62,6 +63,7 @@ const jobSchema = S({
   kind: { type: String, default: "analyze" }, status: { type: String, enum: ["queued", "running", "done", "failed"], default: "queued" },
   progress: { type: Number, default: 0 }, message: String, versionId: Schema.Types.ObjectId,
   reserved: { type: Number, default: 0 }, costUsd: { type: Number, default: 0 }, error: String, fallback: Boolean,
+  genKind: String, prompt: String, aspect: String, seconds: Number, externalOp: String, finalizing: Boolean, result: Schema.Types.Mixed,
 }, { timestamps: true });
 jobSchema.index({ userId: 1, status: 1 });
 export const Job = mk("Job", jobSchema);
@@ -96,7 +98,9 @@ export async function getSettings(): Promise<Settings> {
   if (g.__settings && Date.now() - g.__settings.at < 45_000) return g.__settings.v;
   await connect();
   const row = await SettingsDoc.findById("main").lean();
-  const parsed = SettingsS.safeParse({ ...DEFAULT_SETTINGS, ...(row?.data ?? {}) });
+  const d = DEFAULT_SETTINGS, r: any = row?.data ?? {};
+  // Fusion par groupes : un réglage enregistré avant l'ajout d'une clé (ex. billing, offre « studio ») ne doit pas la faire disparaître
+  const parsed = SettingsS.safeParse({ ...d, ...r, plans: { ...d.plans, ...(r.plans ?? {}) }, billing: { ...d.billing, ...(r.billing ?? {}) }, ai: { ...d.ai, ...(r.ai ?? {}) }, gen: { ...d.gen, ...(r.gen ?? {}) }, tokens: { ...d.tokens, ...(r.tokens ?? {}) } });
   const v = parsed.success ? parsed.data : DEFAULT_SETTINGS;
   g.__settings = { at: Date.now(), v };
   return v;

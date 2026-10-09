@@ -22,10 +22,11 @@
  *   POST   /analyze/estimate            { projectId } → { tokens, credits, minutes, balance }
  *   POST   /analyze                     { projectId } → { jobId }
  *   GET    /jobs/:id                    Statut, progression, versionId
- *   POST   /generate                    Phase 2 (stub)
+ *   POST   /generate                    { projectId, kind: image|video, prompt, aspect, seconds? } → { jobId } (crédits réservés)
  *   POST   /events                      { type, projectId? } (export_done…)
- *   POST   /billing/checkout            { packId } → { url }
- *   POST   /billing/webhook             Fournisseur de paiement (signature + idempotence)
+ *   POST   /billing/checkout            { type: "pack"|"subscription", id } → { url } (respecte les interrupteurs de l'admin)
+ *   POST   /billing/portal              → { url } portail client Polar (factures, résiliation)
+ *   POST   /billing/webhook             Polar (signature vérifiée, idempotent)
  *   GET    /admin/stats | /admin/users | /admin/jobs        (admin)
  *   PATCH  /admin/users/:id             crédits, plan, suspension, rôle, révocation, suppression (admin)
  *   PATCH  /admin/settings              tarifs, quotas, effets désactivés (admin)
@@ -41,8 +42,10 @@ import {
   Job, Ledger, Project, Upload, User, Version, audit, clientIp, connect, getSettings, hit, logEvent,
   nativeClient, saveSettings,
 } from "@/lib/db";
-import { estimateAnalysis, getProvider, grant, planOf, recordStorage, refund, reserve, settle, storageOk } from "@/lib/billing";
-import { ANALYSIS, callGemini, catalogTokens, fallbackDoc, friendlyError, mergeAi, type MediaInput } from "@/lib/gemini";
+import { BillingError, applyBillingEvent, cancelAllRenewals, estimateAnalysis, getProvider, grant, mongoBillingStore, planOf, recordStorage, refund, reserve, resolveCheckout, settle, storageOk } from "@/lib/billing";
+import { ANALYSIS, GenError, callGemini, catalogTokens, fallbackDoc, friendlyError, generateImage, mergeAi, pollVideo, startVideo, type MediaInput } from "@/lib/gemini";
+import { GenRequestS, checkGenRequest, genCostUsd } from "@/lib/generate";
+import { nanoid } from "nanoid";
 import { BriefS, CompositionS, EXAMPLE_DOC, migrate, type Composition, ProjectCreateS, ProjectPatchS, SettingsS, DOC_LIMITS, emptyComposition } from "@/lib/schema";
 import { EFFECTS } from "@/effects";
 
@@ -108,6 +111,11 @@ async function r2List(prefix: string, max = 1000): Promise<string[]> {
 }
 async function r2DeletePrefix(prefix: string) { if (!process.env.R2_BUCKET) return; for (const k of await r2List(prefix, 2000)) await r2Delete(k); }
 
+async function r2Put(key: string, body: Uint8Array, type: string) {
+  const { aws, base } = r2cfg(); const r = await aws.fetch(`${base}/${enc(key)}`, { method: "PUT", body: body as unknown as BodyInit, headers: { "Content-Type": type } });
+  if (!r.ok) throw new Error("Stockage du média généré impossible.");
+}
+
 /* ────────────────────────── Suppression de compte ────────────────────────── */
 async function purgeUser(userId: string) {
   const id = new ObjectId(userId);
@@ -146,7 +154,7 @@ async function runJob(jobId: string) {
     if (!media.some((m) => m.type === "video")) throw new Error("Aucun proxy vidéo envoyé : relancez l'analyse depuis l'éditeur.");
     let result;
     try {
-      result = await callGemini({ media, brief: BriefS.parse(project.brief), disabled: s.disabledEffects, base: doc, ai: s.ai }, (p, m) => setJob(jobId, { progress: p, message: m }));
+      result = await callGemini({ media, brief: BriefS.parse(project.brief), disabled: s.disabledEffects, base: doc, ai: s.ai, suggest: s.gen.enabled }, (p, m) => setJob(jobId, { progress: p, message: m }));
     } catch (e: any) {
       if (e?.raw !== undefined) {
         // Réponse invalide après nouvelle tentative → repli séquentiel + remboursement (tokens journalisés)
@@ -160,7 +168,7 @@ async function runJob(jobId: string) {
     }
     await setJob(jobId, { progress: 0.9, message: "Validation du montage…" });
     const merged = mergeAi(doc, result.ai, s.disabledEffects);
-    const v = await Version.create({ projectId: project._id, ownerId: job.userId, kind: "ai", label: "Montage IA", doc: merged, meta: { raw: result.raw.slice(0, 200_000), fallbackLog: result.log, audioLimited: result.audioLimited, model: result.model, tokensIn: result.tokensIn, tokensOut: result.tokensOut, latencyMs: result.latencyMs, attempts: result.attempts, catalogTokens: catalogTokens(s.disabledEffects) } });
+    const v = await Version.create({ projectId: project._id, ownerId: job.userId, kind: "ai", label: "Montage IA", doc: merged, meta: { raw: result.raw.slice(0, 200_000), suggestions: result.ai.suggestions ?? [], fallbackLog: result.log, audioLimited: result.audioLimited, model: result.model, tokensIn: result.tokensIn, tokensOut: result.tokensOut, latencyMs: result.latencyMs, attempts: result.attempts, catalogTokens: catalogTokens(s.disabledEffects) } });
     const { costUsd } = await settle(uid, job.reserved, jobId, result.tokensIn, result.tokensOut);
     await setJob(jobId, { status: "done", progress: 1, message: "Montage prêt.", versionId: v._id, costUsd });
     await logEvent(uid, "analysis_done", { projectId: String(project._id), tokens: result.tokensIn + result.tokensOut });
@@ -168,6 +176,38 @@ async function runJob(jobId: string) {
     await refund(uid, job.reserved, "analysis_refund", jobId).catch(() => {});
     await setJob(jobId, { status: "failed", progress: 1, error: friendlyError(e), message: "L'analyse a échoué : crédits remboursés." });
   }
+}
+
+/* ────────────────────────── Génération de médias (images, vidéos) ────────────────────────── */
+const hasPaid = async (u: any) => (u?.plan ?? "free") !== "free" || !!(await Ledger.exists({ userId: u?._id, action: "purchase" }));
+
+async function failGeneration(job: any, e: unknown) {
+  await refund(String(job.userId), job.reserved, "generation_refund", String(job._id)).catch(() => {});
+  await setJob(job._id, { status: "failed", progress: 1, error: e instanceof GenError ? e.message : friendlyError(e), message: "La génération a échoué : crédits remboursés." });
+}
+/** Enregistre le média généré dans R2 (compté dans le stockage de l'utilisateur) et rend le job « done » avec le résultat. */
+async function finishGeneration(job: any, s: Awaited<ReturnType<typeof getSettings>>, data: Uint8Array, mime: string) {
+  const uid = String(job.userId), assetId = nanoid(6), key = keyOf(uid, String(job.projectId), assetId, "original");
+  await r2Put(key, data, mime);
+  await Upload.create({ userId: job.userId, projectId: job.projectId, key, size: data.length, done: true });
+  await recordStorage(uid, data.length, key, s);
+  const costUsd = genCostUsd(s.tokens, job.genKind, job.seconds ?? 0);
+  await Ledger.create({ userId: job.userId, kind: "spend", action: "generation", credits: 0, costUsd, refId: String(job._id) });
+  await setJob(job._id, { status: "done", progress: 1, message: "Média prêt.", costUsd,
+    result: { assetId, key, mime, bytes: data.length, kind: job.genKind, prompt: job.prompt, name: `${job.genKind === "image" ? "Image" : "Vidéo"} IA : ${String(job.prompt).slice(0, 40)}` } });
+}
+async function runGeneration(jobId: string) {
+  await connect();
+  const job = await Job.findById(jobId).lean(); if (!job) return;
+  try {
+    const s = await getSettings();
+    await setJob(jobId, { status: "running", progress: 0.1, message: job.genKind === "image" ? "Création de l'image…" : "Lancement de la vidéo…" });
+    if (job.genKind === "image") { const img = await generateImage(s.gen.imageModel, job.prompt, job.aspect, s.ai); await finishGeneration(job, s, img.data, img.mime); }
+    else {
+      const op = await startVideo(s.gen.videoModel, job.prompt, job.aspect, job.seconds, s.ai);
+      await setJob(jobId, { externalOp: op, progress: 0.15, message: "La vidéo se génère (1 à 3 minutes)…" });   // la suite est avancée par les interrogations du client
+    }
+  } catch (e) { await failGeneration(job, e); }
 }
 
 /* ────────────────────────── Routes ────────────────────────── */
@@ -183,7 +223,10 @@ add("GET", "me", "user", async ({ user }) => {
   ]);
   const plan = planOf(u, s);
   return { id: user.id, name: u.name, email: u.email, image: u.image, plan: u.plan ?? "free", role: u.role ?? "user", credits: u.credits ?? 0, storageBytes: u.storageBytes ?? 0,
-    prefs: u.prefs ?? {}, analysis: { proxyShortSide: ANALYSIS.proxyShortSide, proxyFps: ANALYSIS.proxyFps, imageProxySide: ANALYSIS.imageProxySide }, disabledEffects: s.disabledEffects, limits: { ...plan, analysesToday: today }, packs: s.packs, rates: s.rates, ledger: ledger.map(toId) };
+    prefs: u.prefs ?? {}, analysis: { proxyShortSide: ANALYSIS.proxyShortSide, proxyFps: ANALYSIS.proxyFps, imageProxySide: ANALYSIS.imageProxySide }, disabledEffects: s.disabledEffects, limits: { ...plan, analysesToday: today }, gen: { enabled: s.gen.enabled, imageCredits: s.gen.imageCredits, videoCreditsPerSec: s.gen.videoCreditsPerSec, maxVideoSec: s.gen.maxVideoSec, videoEnabled: s.gen.videoEnabled && (!s.gen.videoPaidOnly || (await hasPaid(u))), videoPaidOnly: s.gen.videoPaidOnly },
+    billing: s.billing, provider: getProvider().name, subscription: u.subscription ?? null,
+    packs: s.billing.oneTime ? s.packs.map(({ id, label, credits, price, currency }) => ({ id, label, credits, price, currency })) : [],
+    subscriptionPlans: s.billing.subscriptions ? s.subscriptionPlans.map(({ id, label, price, currency, creditsPerMonth, plan }) => ({ id, label, price, currency, creditsPerMonth, plan })) : [], rates: s.rates, ledger: ledger.map(toId) };
 });
 add("PATCH", "me", "user", async ({ user, body }) => {
   const b = parse(z.strictObject({ name: z.string().min(1).max(80).optional(), prefs: z.strictObject({ platform: BriefS.shape.platform.optional(), lang: z.string().max(12).optional() }).optional() }), body);
@@ -365,10 +408,37 @@ add("POST", "analyze", "user", async ({ user, body }) => {
   return json({ jobId: String(job._id), credits: est.credits }, 202);
 }, ["analyze", ...LIMITS.analyze] as const);
 add("GET", "jobs/:id", "user", async ({ user, p }) => {
-  const j = await Job.findOne({ _id: oid(p[1]), userId: user.id }).lean(); if (!j) throw new HttpError(404, "Tâche introuvable.");
-  return { id: String(j._id), status: j.status, progress: j.progress, message: j.message, error: j.error, versionId: j.versionId ? String(j.versionId) : null, fallback: !!j.fallback };
+  const find = () => Job.findOne({ _id: oid(p[1]), userId: user.id }).lean();
+  let j = await find(); if (!j) throw new HttpError(404, "Tâche introuvable.");
+  // Vidéo en cours : chaque interrogation du client fait avancer la tâche d'un cran (pas de tâche de fond qui dépasserait la durée maximale).
+  if (j.kind === "generate" && j.genKind === "video" && j.status === "running" && j.externalOp) {
+    if (Date.now() - +j.createdAt > 12 * 60_000) await failGeneration(j, new GenError("La génération a pris trop de temps : crédits remboursés."));
+    else {
+      const poll = await pollVideo(j.externalOp).catch(() => ({ state: "running" as const }));    // erreur réseau passagère : on réessaiera au prochain contrôle
+      if (poll.state === "done") {
+        if (await Job.findOneAndUpdate({ _id: j._id, finalizing: { $ne: true } }, { $set: { finalizing: true } })) {
+          try { await finishGeneration(j, await getSettings(), poll.data, poll.mime); } catch (e) { await failGeneration(j, e); }
+        }
+      } else if (poll.state === "failed") await failGeneration(j, new GenError(poll.message));
+    }
+    j = (await find())!;
+  }
+  return { id: String(j._id), kind: j.kind, status: j.status, progress: j.progress, message: j.message, error: j.error, versionId: j.versionId ? String(j.versionId) : null, fallback: !!j.fallback, result: j.result ?? null };
 });
-add("POST", "generate", "user", async () => { throw new HttpError(501, "Génération d'images/vidéos : phase 2."); }, ["pay", ...LIMITS.pay] as const);
+add("POST", "generate", "user", async ({ user, body }) => {
+  const b = parse(GenRequestS, body); await own(user.id, b.projectId, "_id");
+  const [s, u] = await Promise.all([getSettings(), User.findById(user.id).lean()]);
+  if (u.suspended) throw new HttpError(403, "Compte suspendu.");
+  const chk = checkGenRequest(s.gen, b, { hasPaid: await hasPaid(u) }); if (!chk.ok) throw new HttpError(chk.status, chk.msg);
+  const day = new Date(new Date().setHours(0, 0, 0, 0)), limit = b.kind === "image" ? s.gen.dailyImages : s.gen.dailyVideos;
+  if ((await Job.countDocuments({ userId: user.id, kind: "generate", genKind: b.kind, createdAt: { $gte: day } })) >= limit) throw new HttpError(429, `Limite quotidienne atteinte (${limit} ${b.kind === "image" ? "images" : "vidéos"}).`);
+  if ((await Job.countDocuments({ userId: user.id, kind: "generate", status: { $in: ["queued", "running"] } })) >= 2) throw new HttpError(429, "Deux générations sont déjà en cours : attendez qu'une se termine.", {}, { "Retry-After": "30" });
+  if (!storageOk(u, s, b.kind === "image" ? 3_000_000 : 60_000_000)) throw new HttpError(402, "Quota de stockage atteint pour votre offre.");
+  const job = await Job.create({ userId: user.id, projectId: oid(b.projectId), kind: "generate", genKind: b.kind, prompt: b.prompt, aspect: b.aspect, seconds: chk.seconds, status: "queued", reserved: chk.credits, message: "En file d'attente…" });
+  if (!(await reserve(user.id, chk.credits, String(job._id), "generation_reserve"))) { await Job.deleteOne({ _id: job._id }); throw new HttpError(402, `Crédits insuffisants : ${chk.credits} requis.`, { needed: chk.credits }); }
+  after(() => runGeneration(String(job._id)));
+  return json({ jobId: String(job._id), credits: chk.credits }, 202);
+}, ["gen", 600, 20] as const);
 add("POST", "events", "user", async ({ user, body }) => {
   const b = parse(z.strictObject({ type: z.enum(["export_done", "editor_opened"]), projectId: z.string().optional() }), body);
   await logEvent(user.id, b.type, { projectId: b.projectId }); return { ok: true };
@@ -376,20 +446,29 @@ add("POST", "events", "user", async ({ user, body }) => {
 
 // ---- Paiement
 add("POST", "billing/checkout", "user", async ({ user, body }) => {
-  const b = parse(z.strictObject({ packId: z.string().max(30) }), body);
-  if (!(await getSettings()).packs.some((x) => x.id === b.packId)) throw new HttpError(400, "Pack inconnu.");
-  return getProvider().createCheckout({ id: user.id, email: user.email }, b.packId);
+  const b = parse(z.strictObject({ type: z.enum(["pack", "subscription"]), id: z.string().max(30) }), body);
+  const [s, u] = await Promise.all([getSettings(), User.findById(user.id).select("subscription").lean()]);
+  const r = resolveCheckout(s, b.type, b.id, u?.subscription?.status === "active");
+  if (!r.ok) throw new HttpError(r.status, r.msg);
+  const prov = getProvider();
+  if (prov.name === "manual") throw new HttpError(503, "Le paiement en ligne n'est pas encore activé : contactez-nous avec l'offre souhaitée.");
+  try { return await prov.checkout({ id: user.id, email: user.email }, r.productId, { itemType: b.type, itemId: b.id }); }
+  catch (e) { if (e instanceof BillingError) throw new HttpError(e.status, e.message); console.error("[checkout]", (e as Error).message); throw new HttpError(502, "Le service de paiement est indisponible, réessayez dans un instant."); }
+}, ["pay", ...LIMITS.pay] as const);
+add("POST", "billing/portal", "user", async ({ user }) => {
+  const prov = getProvider(); if (!prov.portal) throw new HttpError(503, "Le portail client n'est pas disponible.");
+  try { return { url: await prov.portal(user.id) }; } catch { throw new HttpError(404, "Aucun achat trouvé pour ce compte : le portail s'ouvre après un premier paiement."); }
 }, ["pay", ...LIMITS.pay] as const);
 add("POST", "billing/webhook", "webhook", async ({ req }) => {
-  const ev = await getProvider().handleWebhook(req); if (!ev) return { ok: true };
-  if (await Ledger.findOne({ action: "purchase", refId: ev.ref })) return { ok: true, duplicate: true }; // idempotence
-  const pack = (await getSettings()).packs.find((x) => x.id === ev.packId); if (!pack) throw new HttpError(400, "Pack inconnu.");
-  await grant(ev.userId, pack.credits, "purchase", { refId: ev.ref, amountPaid: ev.amount, currency: ev.currency });
-  return { ok: true };
+  await connect(); const s = await getSettings(), prov = getProvider();
+  let events;
+  try { events = await prov.parseWebhook(req, s); } catch (e) { if (e instanceof BillingError) throw new HttpError(e.status, e.message); throw e; }
+  for (const ev of events) await applyBillingEvent(ev, s, mongoBillingStore, prov.cancelRenewal);   // une erreur ici → 500 → Polar réessaie
+  return { ok: true, handled: events.length };
 });
 
 // ---- Admin
-const ENV_KEYS = ["MONGODB_URI", "APP_ORIGIN", "AUTH_SECRET", "AUTH_GOOGLE_ID", "AUTH_GOOGLE_SECRET", "GEMINI_API_KEY", "R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET", "ADMIN_EMAILS", "CRON_SECRET"];
+const ENV_KEYS = ["POLAR_ACCESS_TOKEN", "POLAR_WEBHOOK_SECRET", "MONGODB_URI", "APP_ORIGIN", "AUTH_SECRET", "AUTH_GOOGLE_ID", "AUTH_GOOGLE_SECRET", "GEMINI_API_KEY", "R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_BUCKET", "ADMIN_EMAILS", "CRON_SECRET"];
 add("GET", "admin/stats", "admin", async () => {
   const s = await getSettings();
   const [users, credits, rev, cost, jobsBy, lastAi, errors] = await Promise.all([
@@ -407,6 +486,7 @@ add("GET", "admin/stats", "admin", async () => {
     users, creditsOutstanding: credits[0]?.c ?? 0, storageBytes: credits[0]?.st ?? 0, revenue: rev, revenueUsd, costUsd, marginUsd: revenueUsd - costUsd, costByAction: cost, jobs: jobsBy,
     health: { env: Object.fromEntries(ENV_KEYS.map((k) => [k, !!process.env[k]])), lastAiCall: lastAi?.updatedAt ?? null, errors: errors.map(toId), model: s.ai.model },
     settings: s, catalogTokens: catalogTokens(s.disabledEffects),
+    payment: { provider: getProvider().name, sandbox: process.env.POLAR_SERVER !== "production", webhookUrl: `${process.env.APP_ORIGIN ?? ""}/api/billing/webhook`, activeSubscribers: await User.countDocuments({ "subscription.status": "active" }) },
     effects: EFFECTS.map((e) => ({ id: e.id, kind: e.kind, status: e.status, cost: e.cost, describe: e.describe, enabled: !s.disabledEffects.includes(e.id) })),
   };
 }, ["admin", ...LIMITS.admin] as const);
@@ -439,9 +519,15 @@ add("PATCH", "admin/users/:id", "admin", async ({ user, p, body }) => {
   return { ok: true };
 }, ["admin", ...LIMITS.admin] as const);
 add("PATCH", "admin/settings", "admin", async ({ user, body }) => {
-  const patch = parse(SettingsS.partial(), body);
+  const patch = parse(SettingsS.partial(), body), before = await getSettings();
   const next = await saveSettings(patch); await audit(user.id, "settings_update", { keys: Object.keys(patch), disabled: patch.disabledEffects });
-  return { settings: next, catalogTokens: catalogTokens(next.disabledEffects) };
+  // Abonnements désactivés : on cesse de RENOUVELER les abonnés actuels (ils gardent leur offre jusqu'à la fin de la période payée).
+  let renewals: { done: number; failed: number } | undefined;
+  if (before.billing.subscriptions && !next.billing.subscriptions) {
+    const prov = getProvider();
+    if (prov.cancelRenewal) { renewals = await cancelAllRenewals(mongoBillingStore, prov.cancelRenewal); await audit(user.id, "subscriptions_disabled", renewals); }
+  }
+  return { settings: next, catalogTokens: catalogTokens(next.disabledEffects), renewals };
 }, ["admin", ...LIMITS.admin] as const);
 add("GET", "admin/jobs", "admin", async () => {
   const rows = await Job.find({}).sort({ createdAt: -1 }).limit(50).lean();
@@ -450,7 +536,7 @@ add("GET", "admin/jobs", "admin", async () => {
   return { items: rows.map((r: any) => ({ id: String(r._id), user: em.get(String(r.userId)), status: r.status, progress: r.progress, message: r.message, error: r.error, costUsd: r.costUsd, reserved: r.reserved, fallback: !!r.fallback, createdAt: r.createdAt })) };
 }, ["admin", ...LIMITS.admin] as const);
 add("POST", "admin/jobs/:id/retry", "admin", async ({ user, p }) => {
-  const j = await Job.findById(oid(p[2])).lean(); if (!j) throw new HttpError(404, "Tâche introuvable.");
+  const j = await Job.findById(oid(p[2])).lean(); if (!j) throw new HttpError(404, "Tâche introuvable."); if (j.kind !== "analyze") throw new HttpError(400, "Seules les analyses peuvent être relancées.");
   const n = await Job.create({ userId: j.userId, projectId: j.projectId, kind: j.kind, status: "queued", reserved: 0, message: "Relance admin…" });
   after(() => runJob(String(n._id))); await audit(user.id, "job_retry", { job: p[2] }); return json({ jobId: String(n._id) }, 202);
 }, ["admin", ...LIMITS.admin] as const);
