@@ -107,7 +107,7 @@ interface MotionOut { scale?: number; opacity?: number; dx?: number; dy?: number
 | `motion_preset` | `clip.motion: {preset: id, params}` | temps local, durée | échelle, opacité, décalage, rotation | oui |
 | `sfx` | clip d'une piste `audio` : `asset: "sfx:<id>"` | — | un son | oui |
 | `audio_fx` | `clip.afx: [{id, params}]` sur un **clip vidéo avec son** ou un **clip audio** | le son du clip | un son transformé | oui (lecture + export) |
-| `shape_preset` | clip d'une piste `shape` | — | — | **non (phase 2)** |
+| `shape_preset` | clip d'une piste `shape` : `shape: {preset: id, params}` | le temps du clip | un dessin 2D (formes, gabarits animés) | oui |
 
 Champs réservés (acceptés par le type mais **ignorés** au rendu) : `Component` (overlay React/R3F), `engine: "sdf" | "extrude"`.
 
@@ -156,7 +156,7 @@ Dans le document, chaque paramètre est une **constante** ou une **animation** :
 ```
 À chaque image : animation évaluée → valeur **bornée** dans [min, max] (jamais rejetée) → clés inconnues supprimées → paramètres manquants remplacés par leur défaut → envoyée à l'effet. L'effet reçoit donc **toujours** des valeurs valides et complètes.
 Le temps des keyframes est **relatif au début du clip** (pour `grade`, c'est le temps de la timeline ; pour une transition, le début du 2ᵉ clip).
-Easings : `linear inQuad outQuad inOutQuad inCubic outCubic inOutCubic outBack outExpo hold`.
+Easings : `linear inQuad outQuad inOutQuad inCubic outCubic inOutCubic outBack outExpo inBack outElastic outBounce spring hold`.
 
 ---
 
@@ -426,8 +426,15 @@ export default defineEffect({
 ```
 Effets audio fournis : `echo_v1` (écho), `delay_v1` (une répétition), `reverb_room_v1` (réverbération de pièce), `radio_voice_v1` (voix radio/téléphone), `autotune_v1` (correction de hauteur, voix seule ; latence ≈ 20 ms). Utilisation : `"afx": [{ "id": "echo_v1", "params": { "mix": 0.25 } }]` sur un clip vidéo ou audio ; les effets s'enchaînent dans l'ordre du tableau (8 maximum).
 
-### 5.10 Réservés (non rendus en phase 1)
-`shape_preset`, `Component` (overlay en composant R3F), `engine: "sdf" | "extrude"`. Ne les utilise pas : ils ne produisent rien. Voir §8 pour les activer.
+### 5.10 `shape_preset` — formes et gabarits animés (moteur canvas 2D)
+Même contrat que les styles de texte (§5.6) : une fonction `draw({ g, w, h, t, dur, params, svg })` appelée à chaque image sur un canvas déjà effacé, **tout en fractions de `w` et `h`**, pure et déterministe (pas de `Math.random`/`Date.now`). `t` = temps local au clip, `dur` = durée du clip. Le clip se pose sur une piste `shape` : `{ "id": "s1", "shape": { "preset": "lower_third_v1", "params": { "title": "Léa Martin" } }, "at": 500, "dur": 2500 }` (ou `anchor` sur des mots). Les paramètres texte (`z.string()`) sont autorisés (titres, légendes) ; les nombres sont bornés (max strictement inférieur à 1 000 000).
+- Outils partagés dans `src/lib/shapes.ts` : `inOut(t, dur)` (apparition/disparition), `strokeProgress(g, len, p)` (tracé progressif), `roundRect`, `quadLength`, `spaced`. Courbes : `ease(nom, x)` de `src/lib/engine.ts` (dont `outBack`, `outElastic`, `outBounce`, `inBack`, `spring`).
+- Gabarits fournis : `lower_third_v1` (tiers inférieur), `underline_swoosh_v1`, `arrow_pointer_v1`, `circle_callout_v1`, `progress_bar_v1`, `stat_counter_v1`, `badge_pop_v1`, `burst_lines_v1`. Le catalogue IA les propose, l'IA choisit et remplit les paramètres.
+- **SVG importé** : un fichier `.svg` devient un asset `{type:"svg", w, h, fp, …}` ; un clip `{ "shape": { "asset": "<id>" } }` le dessine avec `svg_draw_v1` (tracé progressif du contour puis remplissage ; paramètres `size`, `x`, `y`, `draw` (animable), `intro`, `tint`, `color`, `strokeWidth`). Le SVG est lu (`src/lib/svg.ts`) sans jamais être inséré dans la page ; ignorés : texte, dégradés (couleur neutre), filtres, masques, `<use>`, images ; les arcs sont mesurés par leur corde. `svg_draw_v1` porte `aiHidden: true` : il exige un fichier, l'IA ne le voit pas (`aiHidden` sert à cacher tout effet de ce genre).
+- La forme reçoit, comme tout clip visuel, `fx`, `mesh`, `motion`, `transform` et `blend`.
+
+### 5.11 Réservés (non rendus en phase 1)
+`Component` (overlay en composant R3F), `engine: "sdf" | "extrude"`. Ne les utilise pas : ils ne produisent rien. Voir §8 pour les activer.
 
 ---
 
@@ -453,6 +460,7 @@ Num = number | { kf: [[tMs, valeur, easing?], …] }       Col = "#RRGGBB" | { k
 
 Asset (vidéo) { type:"video", name?, desc?, w,h, dur, fps, rot?, hasAudio, bytes, fp, remote?, proxy?, words?: Word[] }
 Asset (image) { type:"image", name?, desc?, w, h, fp?, remote?, proxy?, bytes? }          // se place dans un VideoClip : src:[0, duréeMs] = image fixe (fit "contain" par défaut)
+Asset (svg)   { type:"svg", name?, w, h, fp?, remote?, bytes? }               // dessiné par un clip de piste « shape »
 Asset (audio) { type:"audio", name?, desc?, dur, fp?, remote?, proxy?, bytes?, words? }   // se place dans un AudioClip
 Word { t:"mot", s:ms, e:ms }                               // temps de la SOURCE, jamais de la timeline
 
@@ -470,6 +478,7 @@ VideoClip      { id, asset, src:[ms,ms], speed?:Num, fit?:"cover"|"contain"|"fil
 AdjustmentClip { id, at?, dur?, span?:[idClipA,idClipB], fx:[…] }       // span : suit automatiquement ces clips
 OverlayClip    { id, effect, params?, at?, dur?, blend? }                // (transform/motion/fx/mesh ignorés)
 TextClip       { id, text?, counter?:{from,to,suffix?,dur}, style, params?, reveal?:{by,effect,stagger?}, …communs }
+ShapeClip      { id, shape:{preset?, asset?, params?}, …communs }                       // gabarit du catalogue OU dessin SVG importé
 CaptionClip    { id, from: idDuClipVidéo, style, params?, emphasis?:[i,j], …communs }   // durée = celle du clip source
 AudioClip      { id, asset: idAsset | "sfx:idEffet", src?, at?, anchor?, gain?:Num, fade?:[in,out], dur?, afx?:[{id,params}] }
 Transition     { between:[idA,idB], effect, dur, params? }               // uniquement entre deux clips d'une piste video magnétique
@@ -497,6 +506,7 @@ Exemple complet qui valide (utilise `vignette`, `bw`, `frame_neon_v1`, `cloth_wa
       { "id": "t1", "anchor": { "clip": "c1", "words": [1, 1] }, "text": "Pourquoi", "style": "clean_title",
         "params": { "color": "#FFD84D" }, "reveal": { "by": "letters", "effect": "rise", "stagger": 40 }, "motion": { "preset": "pop_in" } }] },
     { "id": "cap", "kind": "caption", "clips": [{ "id": "k1", "from": "c1", "style": "minimal_clean", "params": { "highlight": "#FF4F7B" } }] },
+    { "id": "shp", "kind": "shape", "clips": [{ "id": "s1", "shape": { "preset": "lower_third_v1", "params": { "title": "Léa Martin" } }, "at": 500, "dur": 2500 }] },
     { "id": "ov", "kind": "overlay", "clips": [{ "id": "o1", "effect": "frame_neon_v1", "params": { "color": "#00F0FF" }, "at": 0, "dur": 3200, "blend": "add" }] }
   ],
   "transitions": [{ "between": ["c1", "c2"], "effect": "glitch_cut", "dur": 200, "params": { "intensity": 1 } }]

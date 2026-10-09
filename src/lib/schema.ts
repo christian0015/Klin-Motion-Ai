@@ -66,7 +66,8 @@ export const AssetS = z.discriminatedUnion("type", [
   }),
   z.strictObject({ type: z.literal("audio"), name: z.string().max(200).optional(), remote: z.string().max(300).optional(), dur: ms, desc: z.string().max(500).optional(), fp: z.string().max(80).optional(), bytes: z.number().nonnegative().optional(), proxy: z.string().max(300).optional(), words: z.array(WordS).max(20000).optional() }),
   z.strictObject({ type: z.literal("image"), name: z.string().max(200).optional(), desc: z.string().max(500).optional(), remote: z.string().max(300).optional(), proxy: z.string().max(300).optional(), w: z.number().int().positive(), h: z.number().int().positive(), fp: z.string().max(80).optional(), bytes: z.number().nonnegative().optional() }),
-  z.strictObject({ type: z.enum(["svg", "lottie", "model3d"]), remote: z.string().max(300).optional() }),
+  z.strictObject({ type: z.literal("svg"), name: z.string().max(200).optional(), w: z.number().int().positive(), h: z.number().int().positive(), fp: z.string().max(80).optional(), remote: z.string().max(300).optional(), bytes: z.number().nonnegative().optional() }),
+  z.strictObject({ type: z.enum(["lottie", "model3d"]), remote: z.string().max(300).optional() }),
   z.strictObject({
     type: z.literal("generated"), kind: z.enum(["image", "video"]), prompt: z.string().max(1000),
     status: z.enum(["pending", "ready", "failed"]), ref: z.string().max(48).optional(),
@@ -122,14 +123,10 @@ export const TextClipS = z.strictObject({
   fill: Fill.optional(), stroke: z.looseObject({}).optional(), glow: NumS.optional(),
 });
 export const CaptionClipS = z.strictObject({ ...visual, from: id, style: z.string().max(60), params: Params.optional(), emphasis: z.tuple([z.number().int(), z.number().int()]).optional() });
+/** Forme : un gabarit du catalogue (`preset` + `params`) OU un dessin SVG importé (`asset`). Dessinée en canvas 2D, comme le texte. */
 export const ShapeClipS = z.strictObject({
-  ...visual, space: z.enum(["2d", "3d"]).optional(),
-  shape: z.strictObject({
-    preset: z.string().max(60).optional(), asset: id.optional(),
-    path: z.array(z.tuple([ms, z.number(), z.number()])).max(512).optional(),
-    morph: z.array(z.strictObject({ t: ms, to: z.string().max(60) })).max(32).optional(),
-    fill: Fill.optional(), stroke: z.looseObject({}).optional(), extrude: z.number().min(0).max(1).optional(),
-  }),
+  ...visual,
+  shape: z.strictObject({ preset: z.string().max(60).optional(), asset: id.optional(), params: Params.optional() }),
 });
 export const AudioClipS = z.strictObject({
   id, asset: z.string().max(80), src: z.tuple([ms, ms]).optional(), at: ms.optional(), anchor: Anchor.optional(), afx: z.array(FxRef).max(8).optional(),
@@ -258,7 +255,11 @@ export type EffectKind =
   | "fx" | "mesh" | "overlay" | "transition" | "caption_style" | "text_style"
   | "shape_preset" | "motion_preset" | "lut" | "sfx" | "audio_fx";
 export interface EffectProps { texture: unknown; params: Record<string, unknown>; t: Ms; size: { w: number; h: number } }
+/** Dessin SVG lu (voir lib/svg.ts) : éléments déjà convertis en chemins, couleurs et transformation résolues. */
+export interface SvgItem { d: string; fill: string | null; stroke: string | null; sw: number; opacity: number; m: [number, number, number, number, number, number]; len: number }
+export interface ParsedSvg { w: number; h: number; items: SvgItem[] }
 export interface DrawArgs {
+  svg?: ParsedSvg;              // shape_preset sur un asset SVG
   g: CanvasRenderingContext2D; w: number; h: number; t: Ms; dur: Ms; text: string;
   words?: { t: string; s: Ms; e: Ms }[]; emphasis?: [number, number]; params: Record<string, any>;
   reveal?: { by: "letters" | "words" | "lines"; stagger: Ms };
@@ -279,6 +280,7 @@ export interface EffectDef<P extends z.ZodObject<any> = z.ZodObject<any>> {
   motion?: (a: { t: Ms; dur: Ms; params: Record<string, any> }) => MotionOut; // motion_preset
   url?: string; duration?: Ms; fonts?: string[];
   audio?: AudioFxDef;                                 // audio_fx
+  aiHidden?: boolean;                                 // jamais proposé à l'IA de montage (ex. effet qui exige un fichier importé)
 }
 export function defineEffect<P extends z.ZodObject<any>>(d: EffectDef<P>): EffectDef<P> {
   return { ...d, params: d.params ?? (z.object({}) as unknown as P) };

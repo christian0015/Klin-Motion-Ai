@@ -18,6 +18,7 @@ const anyNode = (): any => new Proxy({ connect: (n: any) => n, disconnect() {} }
 const fakeCtx = (): any => ({ sampleRate: 48000, currentTime: 0, destination: anyNode(), audioWorklet: { addModule: async () => {} },
   createGain: anyNode, createDelay: anyNode, createBiquadFilter: anyNode, createConvolver: anyNode, createWaveShaper: anyNode, createStereoPanner: anyNode, createChannelSplitter: anyNode, createChannelMerger: anyNode, createDynamicsCompressor: anyNode, createOscillator: anyNode,
   createBuffer: (c: number, len: number) => ({ numberOfChannels: c, length: len, getChannelData: () => new Float32Array(len) }) });
+(globalThis as any).Path2D ??= class {};
 (globalThis as any).AudioWorkletNode ??= class { constructor() { return anyNode(); } };
 
 afterEach(() => vi.restoreAllMocks());
@@ -49,12 +50,12 @@ describe("registre d'effets", () => {
       expect(e.mesh?.vertex ?? "").toMatch(/vec3\s+deform\s*\(\s*vec3\s+p\s*,\s*vec2\s+uv\s*\)/);
       for (const n of e.mesh!.segments) { expect(Number.isInteger(n)).toBe(true); expect(n).toBeGreaterThanOrEqual(1); expect(n).toBeLessThanOrEqual(128); }
     });
-    if (e.kind === "caption_style" || e.kind === "text_style") it("draw : moteur canvas, déterministe, sans Math.random ni Date.now", () => {
+    if (e.kind === "caption_style" || e.kind === "text_style" || e.kind === "shape_preset") it("draw : moteur canvas, déterministe, sans Math.random ni Date.now", () => {
       expect(e.engine).toBe("canvas"); expect(typeof e.draw).toBe("function");
       vi.spyOn(Math, "random").mockImplementation(() => { throw new Error("Math.random interdit : utiliser seeded()"); });
       vi.spyOn(Date, "now").mockImplementation(() => { throw new Error("Date.now interdit : le rendu est pur en fonction de t"); });
       const words = [{ t: "Bonjour", s: 0, e: 400 }, { t: "le", s: 420, e: 600 }, { t: "monde", s: 620, e: 1000 }];
-      for (const t of [0, 500, 1999]) e.draw!({ g: stubCtx(), w: 540, h: 960, t, dur: 2000, text: "Bonjour le monde", words, emphasis: [1, 1], params: coerceParams(e, {}), reveal: { by: "letters", stagger: 40 } });
+      for (const t of [0, 500, 1999]) e.draw!({ g: stubCtx(), w: 540, h: 960, t, dur: 2000, text: "Bonjour le monde", words, emphasis: [1, 1], params: coerceParams(e, {}), reveal: { by: "letters", stagger: 40 }, svg: { w: 100, h: 100, items: [{ d: "M0 0L50 50", fill: "#fff", stroke: "#000", sw: 1, opacity: 1, m: [1, 0, 0, 1, 0, 0], len: 70 }] } });
     });
     if (e.kind === "motion_preset") it("motion : pure et finie", () => {
       expect(typeof e.motion).toBe("function");

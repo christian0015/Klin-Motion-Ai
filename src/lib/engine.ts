@@ -22,6 +22,10 @@ const EASE: Record<string, (x: number) => number> = {
   outBack: (x) => 1 + 2.70158 * Math.pow(x - 1, 3) + 1.70158 * Math.pow(x - 1, 2),
   outExpo: (x) => (x === 1 ? 1 : 1 - Math.pow(2, -10 * x)),
   hold: () => 0,
+  inBack: (x) => 2.70158 * x ** 3 - 1.70158 * x * x,
+  outElastic: (x) => (x === 0 ? 0 : x === 1 ? 1 : Math.pow(2, -10 * x) * Math.sin(((x * 10 - 0.75) * (2 * Math.PI)) / 3) + 1),
+  outBounce: (x) => { const n = 7.5625, d = 2.75; if (x < 1 / d) return n * x * x; if (x < 2 / d) return n * (x -= 1.5 / d) * x + 0.75; if (x < 2.5 / d) return n * (x -= 2.25 / d) * x + 0.9375; return n * (x -= 2.625 / d) * x + 0.984375; },
+  spring: (x) => (x >= 1 ? 1 : 1 - Math.exp(-6 * x) * Math.cos(10 * x)),
 };
 export const EASES = Object.keys(EASE);
 export const ease = (name: string | undefined, x: number) => (EASE[name ?? "linear"] ?? EASE.linear)(Math.min(1, Math.max(0, x)));
@@ -238,6 +242,7 @@ export function validate(doc: Composition, known: (id: string) => boolean, layou
     if (c.motion) unk(c.id, c.motion.preset, "Animation");
     if (t.kind === "overlay") unk(c.id, c.effect, "Overlay");
     if (t.kind === "text" || t.kind === "caption") unk(c.id, c.style, "Style");
+    if (t.kind === "shape") { if (c.shape?.preset) unk(c.id, c.shape.preset, "Forme"); if (c.shape?.asset && doc.assets[c.shape.asset]?.type !== "svg") w.push({ clipId: c.id, code: "asset_missing", msg: `Dessin SVG introuvable (${c.shape.asset}).` }); }
     if (t.kind === "video" && !doc.assets[c.asset]) w.push({ clipId: c.id, code: "asset_missing", msg: `Rush introuvable (${c.asset}).` });
     if (t.kind === "video" && c.src[1] <= c.src[0]) w.push({ clipId: c.id, code: "empty_src", msg: "Clip vidéo de durée nulle." });
   }

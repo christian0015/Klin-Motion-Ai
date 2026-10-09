@@ -8,7 +8,8 @@
 import { create } from "zustand";
 import { applyPatches, enablePatches, produceWithPatches, type Draft, type Patch } from "immer";
 import { nanoid } from "nanoid";
-import { api, ApiError, probe, probeAudio, probeImage, remember, uploadBlob } from "./media";
+import { api, ApiError, fingerprint, probe, probeAudio, probeImage, remember, uploadBlob } from "./media";
+import { parseSvg } from "./svg";
 import { removeClip, splitClipAt, layoutDoc, timelineLenFor, wordsOf } from "./engine";
 import { normalizeTimes } from "./normalize";
 import type { Asset, Brief, Composition, EffectKind, Suggestion, Track, VideoClip, Word } from "./schema";
@@ -58,6 +59,7 @@ interface EditorState {
   applyEffect: (effectId: string) => { ok: boolean; msg?: string };
   importImage: (file: File) => Promise<{ ok: boolean; msg?: string }>;
   importAudio: (file: File, trackId?: string) => Promise<{ ok: boolean; msg?: string }>;
+  importSvg: (file: File) => Promise<{ ok: boolean; msg?: string }>;
   suggestions: Suggestion[]; setSuggestions: (s: Suggestion[]) => void;
   importGenerated: (res: GeneratedResult, at?: number) => Promise<{ ok: boolean; msg?: string }>;
   syncAsset: (assetId: string, file: Blob, fp: string) => Promise<string | undefined>;
@@ -165,7 +167,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
   /** Supprime un rush : ses clips (ancres figées, sous-titres liés retirés), l'asset, et son état de synchronisation. */
   removeAsset: (assetId) => {
     const L = layoutDoc(get().doc);
-    const ids = L.list.filter((p) => (p.kind === "video" || p.kind === "audio") && (p.clip as { asset?: string }).asset === assetId).map((p) => p.id);
+    const ids = L.list.filter((p) => ((p.kind === "video" || p.kind === "audio") && (p.clip as { asset?: string }).asset === assetId) || (p.kind === "shape" && (p.clip as { shape?: { asset?: string } }).shape?.asset === assetId)).map((p) => p.id);
     get().apply("Supprimer le rush", (d) => { for (const id of ids) removeClip(d as Composition, L, id); delete d.assets[assetId]; });
     set((st) => { const sync = { ...st.sync }, problems = { ...st.problems }; delete sync[assetId]; delete problems[assetId]; return { sync, problems, selection: st.selection && ids.includes(st.selection) ? null : st.selection }; });
   },
@@ -211,7 +213,13 @@ export const useEditor = create<EditorState>()((set, get) => ({
         clip = { id, asset: snd[0], src: [0, a.dur], at, dur: a.dur, gain: 1 };
         break;
       }
-      default: return { ok: false, msg: "Ce type de piste n'est pas encore disponible (phase 2)." };
+      case "shape": {
+        const svgId = pick?.assetId && doc.assets[pick.assetId]?.type === "svg" ? pick.assetId : undefined, preset = first("shape_preset");
+        if (!svgId && !preset) return none("forme");
+        clip = { id, shape: svgId ? { asset: svgId } : { preset }, at, dur: 2500 };
+        break;
+      }
+      default: return { ok: false, msg: "Ce type de piste n'est pas disponible." };
     }
     const insertAt = tr.kind === "video" && tr.magnetic && pick?.at !== undefined ? L.list.filter((q) => q.trackId === tr.id && q.at + q.dur / 2 < at).length : -1;   // dépôt sur la piste principale : à la bonne place
     get().apply("Ajouter un élément", (d) => {
@@ -227,9 +235,9 @@ export const useEditor = create<EditorState>()((set, get) => ({
   /** Place un média sur une piste adaptée (vidéo → piste magnétique ; image → piste vidéo libre ; audio → piste audio), en la créant si besoin. */
   placeAsset: (assetId, at) => {
     const st = get(), a = st.doc.assets[assetId];
-    if (!a || (a.type !== "video" && a.type !== "image" && a.type !== "audio")) return { ok: false, msg: "Média introuvable." };
-    const tracks = st.doc.tracks, kind = a.type === "audio" ? "audio" : "video", magnetic = a.type === "video";
-    const existing = magnetic ? tracks.find((t) => t.kind === "video" && t.magnetic) : kind === "video" ? [...tracks].reverse().find((t) => t.kind === "video" && !t.magnetic) : tracks.find((t) => t.kind === "audio");
+    if (!a || (a.type !== "video" && a.type !== "image" && a.type !== "audio" && a.type !== "svg")) return { ok: false, msg: "Média introuvable." };
+    const tracks = st.doc.tracks, kind = a.type === "audio" ? "audio" : a.type === "svg" ? "shape" : "video", magnetic = a.type === "video";
+    const existing = magnetic ? tracks.find((t) => t.kind === "video" && t.magnetic) : kind === "video" ? [...tracks].reverse().find((t) => t.kind === "video" && !t.magnetic) : tracks.find((t) => t.kind === kind);
     let id = existing?.id;
     if (!id) {
       const newId = magnetic && !tracks.some((t) => t.id === "v1") ? "v1" : nanoid(5); id = newId;
@@ -265,6 +273,16 @@ export const useEditor = create<EditorState>()((set, get) => ({
       return get().placeAsset(res.assetId);
     } catch (e) { return { ok: false, msg: (e as Error).message }; }
   },
+  /** Un fichier SVG devient une forme dessinable (tracé progressif) : il est lu et validé tout de suite, jamais inséré dans la page. */
+  importSvg: async (file) => {
+    try {
+      const p = parseSvg(await file.text()), fp = await fingerprint(file), aid = nanoid(6);
+      await remember(fp, file);
+      get().apply("Ajouter un SVG", (d) => { d.assets[aid] = { type: "svg", name: file.name, w: Math.max(1, Math.round(p.w)), h: Math.max(1, Math.round(p.h)), fp, bytes: file.size }; });
+      get().setSync(aid, { state: "local", progress: 0 });
+      const r = get().placeAsset(aid); void get().syncAsset(aid, file, fp); return r;
+    } catch (e) { return { ok: false, msg: (e as Error).message }; }
+  },
   importAudio: async (file, trackId) => {
     try {
       const p = await probeAudio(file); await remember(p.fp, file);
@@ -279,10 +297,10 @@ export const useEditor = create<EditorState>()((set, get) => ({
   syncAsset: async (assetId, file, fp) => {
     get().setSync(assetId, { state: "uploading", progress: 0, error: undefined });
     const kind = get().doc.assets[assetId]?.type;
-    const mime = file.type && /^(video|audio|image)\/[\w.+-]+$/.test(file.type) ? file.type : kind === "audio" ? "audio/mpeg" : kind === "image" ? "image/png" : "video/mp4";
+    const mime = file.type && /^(video|audio|image)\/[\w.+-]+$/.test(file.type) ? file.type : kind === "audio" ? "audio/mpeg" : kind === "image" ? "image/png" : kind === "svg" ? "image/svg+xml" : "video/mp4";
     try {
       const key = await uploadBlob(file, { projectId: get().projectId, assetId, kind: "original", type: mime, fp }, (p) => get().setSync(assetId, { progress: p }));
-      get().silent((d) => { const a = d.assets[assetId]; if (a && (a.type === "video" || a.type === "audio" || a.type === "image")) a.remote = key; });
+      get().silent((d) => { const a = d.assets[assetId]; if (a && (a.type === "video" || a.type === "audio" || a.type === "image" || a.type === "svg")) a.remote = key; });
       get().setSync(assetId, { state: "synced", progress: 1, error: undefined });
       return undefined;
     } catch (e) {
@@ -321,8 +339,8 @@ export const useEditor = create<EditorState>()((set, get) => ({
     const st = get(), a = st.doc.assets[assetId], tr = st.doc.tracks.find((t) => t.id === trackId);
     if (!a || !tr) return { ok: false, msg: "Média ou piste introuvable." };
     if (tr.locked) return { ok: false, msg: "Cette piste est verrouillée." };
-    const fits = (tr.kind === "video" && (a.type === "video" || a.type === "image")) || (tr.kind === "audio" && a.type === "audio");
-    if (!fits) return { ok: false, msg: "Ce média ne va pas sur cette piste : vidéos et images vont sur une piste vidéo, les sons sur une piste audio." };
+    const fits = (tr.kind === "video" && (a.type === "video" || a.type === "image")) || (tr.kind === "audio" && a.type === "audio") || (tr.kind === "shape" && a.type === "svg");
+    if (!fits) return { ok: false, msg: "Ce média ne va pas sur cette piste : vidéos et images vont sur une piste vidéo, les sons sur une piste audio, les dessins SVG sur une piste Formes." };
     return get().addDefaultClip(trackId, { assetId, at: Math.max(0, Math.round(atMs)) });
   },
   replaceClipAsset: (clipId, assetId) => {
@@ -385,7 +403,16 @@ export const useEditor = create<EditorState>()((set, get) => ({
         return hasSound ? onClip("Effet audio", (c) => { c.afx = [...(c.afx ?? []), { id: effectId }].slice(0, 8); }) : needClip("un clip vidéo avec du son, ou un clip audio");
       }
       case "sfx": return push(ensure("audio"), { id: nanoid(6), asset: `sfx:${effectId}`, at: t, dur: def.duration ?? 1000, gain: 1 }, "Effet sonore");
-      default: return { ok: false, msg: "Ce type d'élément sera disponible avec les formes et gabarits." };
+      case "shape_preset": {
+        if (effectId === "svg_draw_v1") {   // ce gabarit dessine un fichier : il faut un SVG importé
+          const svg = Object.entries(st.doc.assets).find(([, a]) => a.type === "svg");
+          if (!svg) return { ok: false, msg: "Importez d'abord un fichier SVG (onglet Médias), puis glissez-le sur une piste Formes." };
+          return get().placeAsset(svg[0]);
+        }
+        if (p?.kind === "shape") return onClip("Forme", (c) => { c.shape = { ...(c.shape?.asset ? { asset: c.shape.asset } : {}), preset: effectId }; });
+        return push(ensure("shape"), { id: nanoid(6), shape: { preset: effectId }, at: t, dur: 2500 }, "Forme");
+      }
+      default: return { ok: false, msg: "Ce type d'élément n'est pas applicable." };
     }
   },
 

@@ -22,7 +22,7 @@ import { layoutDoc, validate } from "@/lib/engine";
 import { getEffect } from "@/effects";
 import type { Asset, Brief, Composition } from "@/lib/schema";
 
-type MediaAsset = Extract<Asset, { type: "video" | "image" | "audio" }>;
+type MediaAsset = Extract<Asset, { type: "video" | "image" | "audio" | "svg" }>;
 
 interface Me { gen?: GenInfo; credits: number; limits: { watermark: boolean }; analysis: { proxyShortSide: number; proxyFps: number; imageProxySide: number }; disabledEffects: string[] }
 interface Initial { id: string; name: string; rev: number; brief: Brief; doc: Composition }
@@ -47,7 +47,7 @@ export default function Editor({ initial }: { initial: Initial }) {
     void act.loadVersions();
     (async () => {
       for (const [id, a] of Object.entries(initial.doc.assets)) {
-        if (a.type !== "video" && a.type !== "image" && a.type !== "audio") continue;
+        if (a.type !== "video" && a.type !== "image" && a.type !== "audio" && a.type !== "svg") continue;
         const fp = (a as { fp?: string }).fp; if (!fp) continue;
         const local = await hasLocal(fp);
         useEditor.getState().setSync(id, { state: local ? (a.remote ? "synced" : "local") : a.remote ? "synced" : "missing", progress: a.remote ? 1 : 0 });
@@ -75,9 +75,9 @@ export default function Editor({ initial }: { initial: Initial }) {
   }, []);
 
   const warnings = useMemo(() => validate(s.doc, (id) => !!getEffect(id, new Set(s.disabled))), [s.doc, s.disabled]);
-  const mediaAssets = Object.entries(s.doc.assets).filter((e): e is [string, MediaAsset] => e[1].type === "video" || e[1].type === "image" || e[1].type === "audio");
+  const mediaAssets = Object.entries(s.doc.assets).filter((e): e is [string, MediaAsset] => e[1].type === "video" || e[1].type === "image" || e[1].type === "audio" || e[1].type === "svg");
   const videoAssets = Object.entries(s.doc.assets).filter(([, a]) => a.type === "video") as [string, Extract<Composition["assets"][string], { type: "video" }>][];
-  const used = useMemo(() => new Set(layoutDoc(s.doc).list.filter((p) => p.kind === "video" || p.kind === "audio").map((p) => (p.clip as { asset: string }).asset)), [s.doc]);
+  const used = useMemo(() => new Set(layoutDoc(s.doc).list.filter((p) => p.kind === "video" || p.kind === "audio" || p.kind === "shape").map((p) => p.kind === "shape" ? (p.clip as { shape: { asset?: string } }).shape.asset ?? "" : (p.clip as { asset: string }).asset)), [s.doc]);
   const hasVideoUsed = videoAssets.some(([id]) => used.has(id));
   const busy = s.status !== "ready" && s.status !== "idle" && s.status !== "error";
 
@@ -110,7 +110,8 @@ export default function Editor({ initial }: { initial: Initial }) {
     try {
       await addVideos(files.filter((f) => f.type.startsWith("video/")));
       for (const f of files) {
-        if (f.type.startsWith("image/")) { const r = await st().importImage(f); if (!r.ok) say("err", r.msg ?? "Image illisible."); }
+        if (f.type === "image/svg+xml" || /\.svg$/i.test(f.name)) { const r = await st().importSvg(f); if (!r.ok) say("err", r.msg ?? "SVG illisible."); }
+        else if (f.type.startsWith("image/")) { const r = await st().importImage(f); if (!r.ok) say("err", r.msg ?? "Image illisible."); }
         else if (f.type.startsWith("audio/")) { const r = await st().importAudio(f); if (!r.ok) say("err", r.msg ?? "Audio illisible."); }
         else if (!f.type.startsWith("video/")) say("err", `« ${f.name} » : type non pris en charge (vidéo, image ou audio).`);
       }
@@ -120,7 +121,7 @@ export default function Editor({ initial }: { initial: Initial }) {
   /** Redonne un fichier à un rush. Projet d'exemple : n'importe quelle vidéo convient et remplace les métadonnées fictives. */
   const placeAsset = (assetId: string) => { const r = useEditor.getState().placeAsset(assetId); if (r.msg) say("err", r.msg); };
   const removeRush = (assetId: string, name: string) => {
-    const n = layoutDoc(useEditor.getState().doc).list.filter((p) => (p.kind === "video" || p.kind === "audio") && (p.clip as { asset?: string }).asset === assetId).length;
+    const n = layoutDoc(useEditor.getState().doc).list.filter((p) => ((p.kind === "video" || p.kind === "audio") && (p.clip as { asset?: string }).asset === assetId) || (p.kind === "shape" && (p.clip as { shape?: { asset?: string } }).shape?.asset === assetId)).length;
     if (!window.confirm(`Supprimer « ${name} » ?${n ? ` ${n} clip(s) de la timeline seront retirés (Ctrl+Z les restaure).` : ""} La copie cloud est supprimée.`)) return;
     const st = useEditor.getState(); st.removeAsset(assetId);
     void api(`projects/${st.projectId}/assets/${assetId}`, "DELETE").catch(() => {});
@@ -150,7 +151,7 @@ export default function Editor({ initial }: { initial: Initial }) {
 
   /* ───── analyse IA : proxys → estimation → confirmation → job → un seul patch ───── */
   const prepareAndEstimate = async () => {
-    const targets = mediaAssets.filter(([id]) => used.has(id));   // vidéos, images ET sons placés : l'IA les voit tous
+    const targets = mediaAssets.filter((e): e is [string, Exclude<MediaAsset, { type: "svg" }>] => used.has(e[0]) && e[1].type !== "svg");   // un dessin SVG n'est pas analysé par l'IA   // vidéos, images ET sons placés : l'IA les voit tous
     if (!targets.some(([, a]) => a.type === "video")) { say("err", "Aucun rush vidéo dans la timeline : ajoutez une vidéo, ou utilisez « Ajouter à la timeline » dans le panneau Médias."); return; }
     try {
       const cfg = me?.analysis ?? { proxyShortSide: 240, proxyFps: 12, imageProxySide: 768 }, st = useEditor.getState();
@@ -221,8 +222,7 @@ export default function Editor({ initial }: { initial: Initial }) {
   const aiVersion = s.versions.find((v) => v.kind === "ai");
 
   return (
-    // <div className="flex h-dvh min-h-[640px] flex-col">
-    <div className="flex min-h-dvh lg:min-h-[640px] lg:h-dvh flex-col">
+    <div className="flex h-dvh min-h-[640px] flex-col">
       {/* barre d'outils */}
       <header className="flex flex-wrap items-center gap-2 border-b border-line bg-panel px-3 py-2">
         <Link href="/dashboard" className="font-display text-3xl leading-none text-ink" aria-label="Retour aux projets">MotionIA</Link>
@@ -258,23 +258,23 @@ export default function Editor({ initial }: { initial: Initial }) {
           {left === "rushs" && (
             <div className="space-y-3 p-3">
               <label className="btn btn-primary w-full cursor-pointer">Ajouter des médias<input type="file" accept="video/*,image/*,audio/*" multiple hidden onChange={(e) => { void addMedia(e.target.files); e.target.value = ""; }} /></label>
-              <p className="text-[11px] text-muted">Vidéos, images (PNG, JPEG, WebP, GIF) et sons (MP3, WAV, M4A, OGG).</p>
+              <p className="text-[11px] text-muted">Vidéos, images (PNG, JPEG, WebP, GIF), sons (MP3, WAV, M4A, OGG) et dessins SVG (tracé animé).</p>
               {me?.gen && <GenerateButton gen={me.gen} credits={me.credits} say={say} onDone={() => api<Me>("me").then(setMe).catch(() => {})} />}
               {me?.gen && <Suggestions gen={me.gen} credits={me.credits} say={say} onDone={() => api<Me>("me").then(setMe).catch(() => {})} />}
               {!mediaAssets.length && <p className="font-display text-2xl text-muted">Déposez vos vidéos, images et sons pour commencer.</p>}
               {mediaAssets.map(([id, a]) => {
                 const sy = s.sync[id], fp = (a as { fp?: string }).fp ?? "", example = fp.startsWith("example-");
                 const mb = (a as { bytes?: number }).bytes ? ` · ${((a as { bytes: number }).bytes / 1048576).toFixed(1)} Mo` : "";
-                const meta = a.type === "audio" ? `${(a.dur / 1000).toFixed(1)} s${mb}` : a.type === "image" ? `${a.w}×${a.h}${mb}` : `${(a.dur / 1000).toFixed(1)} s · ${a.w}×${a.h}${mb}`;
+                const meta = a.type === "audio" ? `${(a.dur / 1000).toFixed(1)} s${mb}` : a.type === "image" || a.type === "svg" ? `${a.w}×${a.h}${mb}` : `${(a.dur / 1000).toFixed(1)} s · ${a.w}×${a.h}${mb}`;
                 return (
                   <div key={id} className="cursor-grab rounded-lg border border-line p-2 text-xs" draggable title="Glissez ce média sur une piste de la timeline"
                     onDragStart={(e) => { e.dataTransfer.setData("application/x-motionia-asset", id); e.dataTransfer.effectAllowed = "copy"; useEditor.getState().setDragAsset(id); }} onDragEnd={() => useEditor.getState().setDragAsset(null)}>
-                    <p className="truncate font-medium" title={a.name}><span className="chip mr-1.5">{a.type === "video" ? "Vidéo" : a.type === "image" ? "Image" : "Audio"}</span>{a.name ?? id}</p>
+                    <p className="truncate font-medium" title={a.name}><span className="chip mr-1.5">{a.type === "video" ? "Vidéo" : a.type === "image" ? "Image" : a.type === "svg" ? "SVG" : "Audio"}</span>{a.name ?? id}</p>
                     <p className="mt-0.5 text-muted">{meta}</p>
-                    <input className="field mt-1.5 !py-1" placeholder="Description (optionnel, lue par l'IA)" defaultValue={a.desc ?? ""} maxLength={500} onBlur={(e) => act.apply("Description du média", (d) => { const x = d.assets[id]; if (x && (x.type === "video" || x.type === "image" || x.type === "audio")) x.desc = e.target.value || undefined; })} />
+                    {a.type !== "svg" && <input className="field mt-1.5 !py-1" placeholder="Description (optionnel, lue par l'IA)" defaultValue={a.desc ?? ""} maxLength={500} onBlur={(e) => act.apply("Description du média", (d) => { const x = d.assets[id]; if (x && (x.type === "video" || x.type === "image" || x.type === "audio")) x.desc = e.target.value || undefined; })} />}
                     <p className={`mt-1.5 ${sy?.state === "missing" ? "text-warn" : "text-muted"}`}>
                       {sy?.state === "uploading" ? `Synchronisation… ${Math.round(sy.progress * 100)} %` : sy?.state === "synced" ? "Synchronisé ✓" : sy?.state === "downloading" ? "Téléchargement depuis le cloud…" : sy?.state === "missing" ? (example ? "Exemple : aucune vidéo réelle" : "Fichier absent de cet appareil") : "Local (non synchronisé)"}
-                      {a.proxy ? " · prêt pour l'IA" : ""}{!used.has(id) ? " · non utilisé dans la timeline" : ""}
+                      {"proxy" in a && a.proxy ? " · prêt pour l'IA" : ""}{!used.has(id) ? " · non utilisé dans la timeline" : ""}
                     </p>
                     {sy?.error && <p className="mt-1 text-warn">{sy.error}</p>}
                     <div className="mt-1.5 flex gap-1.5">
@@ -282,7 +282,7 @@ export default function Editor({ initial }: { initial: Initial }) {
                       <button className="btn !px-2 !py-0.5 text-bad" onClick={() => removeRush(id, a.name ?? id)}>Supprimer</button>
                     </div>
                     {s.problems[id] && <p className="mt-1.5 rounded border border-bad/40 bg-bad/10 p-1.5 text-bad">{s.problems[id]}</p>}
-                    {sy?.state === "missing" && <label className="btn mt-1.5 w-full cursor-pointer !py-1">{example ? "Relier une vraie vidéo" : "Redonner le fichier"}<input type="file" accept={`${a.type}/*`} hidden onChange={(e) => { void relink(id, { fp }, e.target.files?.[0]); e.target.value = ""; }} /></label>}
+                    {sy?.state === "missing" && <label className="btn mt-1.5 w-full cursor-pointer !py-1">{example ? "Relier une vraie vidéo" : "Redonner le fichier"}<input type="file" accept={a.type === "svg" ? "image/svg+xml,.svg" : `${a.type}/*`} hidden onChange={(e) => { void relink(id, { fp }, e.target.files?.[0]); e.target.value = ""; }} /></label>}
                   </div>
                 );
               })}

@@ -46,7 +46,7 @@ const cache = new Map<string, string>();
 export function catalogForPrompt(disabled: readonly string[] = []): string {
   const key = [...disabled].sort().join(",");
   let c = cache.get(key);
-  if (!c) { c = activeEffects(disabled).map(line).join("\n"); cache.set(key, c); }
+  if (!c) { c = activeEffects(disabled).filter((e) => !e.aiHidden).map(line).join("\n"); cache.set(key, c); }
   return c;
 }
 /** Taille approximative du catalogue en tokens (affichée dans l'admin). */
@@ -60,6 +60,7 @@ RÈGLES :
 - Décide des cuts (supprime hésitations, silences, répétitions), du rythme, du style, des effets, des sous-titres et du look, selon le brief.
 - Piste vidéo principale : kind "video", magnetic:true, clips enchaînés SANS "at" ; chaque clip = { id, asset, src:[début,fin] } en temps source.
 - IMAGES : place-les dans une piste kind "video" SANS magnetic, clip { id, asset:<id image>, src:[0, durée_ms], at, dur, fit:"contain" (logo, capture, photo entière) ou "cover" (plein cadre), transform, motion }. Une image dure ce que tu décides (2000 à 5000 ms en général).
+- FORMES / GABARITS (type shape_preset du catalogue) : piste kind "shape", clip { id, shape:{preset, params}, at ou anchor, dur (1500 à 3500 ms) }. Avec parcimonie : un nom (lower_third), un chiffre (stat_counter), un mot clé (underline_swoosh, badge_pop). Les textes des paramètres (title, label, text) sont dans la langue de la vidéo.
 - SONS / MUSIQUE : piste kind "audio", clip { id, asset:<id son>, src:[début,fin], at, dur, gain (0 à 1 ; une musique sous une voix : 0.15 à 0.3), fade:[entréeMs, sortieMs] }.
 - Effets AUDIO (kind audio_fx) : champ "afx":[{id, params}] sur un clip vidéo (sa voix) ou audio. Reste sobre : un effet audio bien placé suffit.
 - Tu n'es pas obligé d'utiliser tous les médias : n'utilise que ceux qui servent le brief. Ne place JAMAIS un média qui n'existe pas dans la liste fournie.
@@ -74,7 +75,7 @@ ${catalogForPrompt(disabled)}`;
 
 /* ───── Schéma de réponse SIMPLIFIÉ (limites de complexité), enum tiré du registre ───── */
 export function responseSchema(disabled: readonly string[], suggest = false) {
-  const ids = (k?: string[]) => activeEffects(disabled).filter((e) => !k || k.includes(e.kind)).map((e) => e.id);
+  const ids = (k?: string[]) => activeEffects(disabled).filter((e) => !e.aiHidden && (!k || k.includes(e.kind))).map((e) => e.id);
   const e = (k: string[]) => ({ type: "string", enum: ids(k).length ? ids(k) : ["none"] });
   const num = { anyOf: [{ type: "number" }, { type: "object", properties: { kf: { type: "array", items: { type: "array", items: { type: ["number", "string"] } } } }, required: ["kf"] }] };
   const fxRef = (k: string[]) => ({ type: "object", properties: { id: e(k), params: { type: "object", additionalProperties: true } }, required: ["id"] });
@@ -87,6 +88,7 @@ export function responseSchema(disabled: readonly string[], suggest = false) {
       anchor: { type: "object", properties: { clip: { type: "string" }, words: { type: "array", items: { type: "integer" } }, offset: { type: "integer" }, dur: { type: "integer" } }, required: ["clip", "words"] },
       span: { type: "array", items: { type: "string" } }, emphasis: { type: "array", items: { type: "integer" } },
       fx: { type: "array", items: fxRef(["fx"]) }, afx: { type: "array", items: fxRef(["audio_fx"]) },
+      shape: { type: "object", properties: { preset: e(["shape_preset"]), params: { type: "object", additionalProperties: true } }, required: ["preset"] },
       mesh: { type: "object", properties: { id: e(["mesh"]), params: { type: "object", additionalProperties: true } }, required: ["id"] },
       motion: { type: "object", properties: { preset: e(["motion_preset"]), params: { type: "object", additionalProperties: true } }, required: ["preset"] },
       blend: { type: "string", enum: ["normal", "add", "screen", "multiply", "overlay"] },
@@ -131,9 +133,11 @@ export function sanitize(doc: Composition, disabled: readonly string[] = []): Co
     if (c.mesh) c.mesh = ok(c.mesh.id) ? { ...c.mesh, params: fixParams(c.mesh.id, c.mesh.params) } : undefined;
     if (c.motion && !ok(c.motion.preset)) c.motion = undefined;
     if (c.effect && c.params) c.params = fixParams(c.effect, c.params);
+    if (c.shape?.preset) c.shape.params = fixParams(c.shape.preset, c.shape.params);
     if (c.src) c.src = [Math.max(0, Math.round(c.src[0])), Math.max(0, Math.round(c.src[1]))];
     for (const k of Object.keys(c)) if (c[k] === undefined) delete c[k];
   }
+  for (const t of doc.tracks) if (t.kind === "shape") t.clips = (t.clips as any[]).filter((c) => c.shape?.asset || (c.shape?.preset && ok(c.shape.preset))) as any;   // gabarit inconnu : forme écartée
   doc.transitions = doc.transitions.filter((x) => ok(x.effect));
   if (doc.grade && !ok(doc.grade.lut)) delete doc.grade;
   return doc;
@@ -154,7 +158,7 @@ export function mergeAi(base: Composition, ai: AiOutput, disabled: readonly stri
   const taken = new Set(doc.tracks.flatMap((t) => [t.id, ...t.clips.map((c) => c.id)]));
   const uniq = (id: string) => { let n = id, i = 2; while (taken.has(n)) n = `${id}_${i++}`; taken.add(n); return n; };
   for (const t of base.tracks) {
-    const keep = t.kind === "audio" || (t.kind === "video" && t.clips.length > 0 && t.clips.every((c) => base.assets[c.asset]?.type === "image"));
+    const keep = t.kind === "audio" || (t.kind === "video" && t.clips.length > 0 && t.clips.every((c) => base.assets[c.asset]?.type === "image")) || (t.kind === "shape" && t.clips.length > 0 && t.clips.every((c) => c.shape.asset));
     if (!keep) continue;
     const clips = (t.clips as any[]).filter((c) => !c.anchor && !usedByAi.has(c.asset)).map((c) => ({ ...c, id: uniq(c.id) }));
     if (clips.length) doc.tracks.push({ ...t, id: uniq(t.id), clips } as any);

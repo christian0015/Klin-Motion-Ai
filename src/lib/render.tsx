@@ -13,9 +13,10 @@ import {
   buildFrameState, evalCol, evalNum, layoutDoc, resolveTransform, srcToTimeline, wordsOf,
   type FrameState, type Layer, type Layout,
 } from "./engine";
-import { coerceParams, constParams, paramSpecs, type AudioClip, type CaptionClip, type Composition, type EffectDef, type FxRef, type TextClip, type VideoClip, DEFAULTS, type Ms } from "./schema";
+import { coerceParams, constParams, paramSpecs, type ParsedSvg, type ShapeClip, type AudioClip, type CaptionClip, type Composition, type EffectDef, type FxRef, type TextClip, type VideoClip, DEFAULTS, type Ms } from "./schema";
 import { getEffect } from "@/effects";
 import { getFile } from "./media";
+import { parseSvg } from "./svg";
 
 /* ────────────────────────── Sources d'images ────────────────────────── */
 export interface FrameSource {
@@ -23,6 +24,8 @@ export interface FrameSource {
   prepare(state: FrameState): Promise<void> | void;
   /** Texture du clip vidéo (clé = id du clip). */
   texture(clipId: string): { tex: THREE.Texture; w: number; h: number } | null;
+  /** Dessin SVG déjà chargé d'un asset (formes) ; null tant qu'il n'est pas lu. */
+  svg?(assetId: string): ParsedSvg | null;
 }
 
 /** Preview : un <video> par clip, synchronisé sur l'horloge maître (audio inclus). */
@@ -103,11 +106,28 @@ export class PreviewSource implements FrameSource {
       finally { this.building.delete(key); }
     })();
   }
+  private svgs = new Map<string, ParsedSvg>(); private svgLoading = new Set<string>();
+  svg(assetId: string) { return this.svgs.get(assetId) ?? null; }
+  private ensureSvg(assetId: string) {
+    if (this.svgs.has(assetId) || this.svgLoading.has(assetId)) return;
+    const f = this.failed.get(assetId); if (f && Date.now() - f < 2500) return;
+    const a = this.getDoc().assets[assetId]; if (!a || a.type !== "svg") return;
+    this.svgLoading.add(assetId);
+    void (async () => {
+      try {
+        const blob = await getFile(this.projectId, assetId, a as { fp?: string; remote?: string; bytes?: number });
+        if (!blob) { this.failed.set(assetId, Date.now()); this.onMissing?.(assetId); return; }
+        this.svgs.set(assetId, parseSvg(await blob.text()));
+      } catch (e) { this.failed.set(assetId, Date.now()); this.onProblem?.(assetId, (e as Error).message); }
+      finally { this.svgLoading.delete(assetId); }
+    })();
+  }
   prepare(state: FrameState) { void state; }
   /** Appelé à chaque image par le Preview : aligne lecture/pause/position/volume sur l'horloge. */
   sync(state: FrameState, layout: Layout, playing: boolean, doc: Composition) {
     if (playing && this.actx?.state === "suspended") void this.actx.resume().catch(() => {});   // un contexte suspendu = son capté mais muet
     const live = new Set<string>();
+    for (const l of state.layers) if (l.p.kind === "shape") { const sa = (l.p.clip as ShapeClip).shape.asset; if (sa) this.ensureSvg(sa); }
     for (const l of state.layers) {
       if (l.p.kind !== "video") continue;
       const c = l.p.clip as VideoClip; live.add(l.p.id); this.clipAsset.set(l.p.id, c.asset);
@@ -166,6 +186,14 @@ export class ExportSource implements FrameSource {
   }
   doc!: Composition;
   /** Image fixe : décodée une fois dans un canvas (l'orientation EXIF est appliquée par le navigateur). */
+  private svgs = new Map<string, ParsedSvg>();
+  svg(assetId: string) { return this.svgs.get(assetId) ?? null; }
+  private async loadSvg(assetId: string) {
+    if (this.svgs.has(assetId)) return;
+    const a: any = this.doc.assets[assetId], blob = await getFile(this.projectId, assetId, a);
+    if (!blob) throw new Error(`Dessin SVG manquant : « ${a?.name ?? assetId} ». Redonnez le fichier depuis l'éditeur.`);
+    this.svgs.set(assetId, parseSvg(await blob.text()));
+  }
   private async loadImage(clipId: string, assetId: string) {
     if (this.texs.has(clipId)) return;
     const a: any = this.doc.assets[assetId], blob = await getFile(this.projectId, assetId, a);
@@ -176,6 +204,7 @@ export class ExportSource implements FrameSource {
   }
   async prepare(state: FrameState) {
     for (const l of state.layers) {
+      if (l.p.kind === "shape") { const sa = (l.p.clip as ShapeClip).shape.asset; if (sa) await this.loadSvg(sa); continue; }
       if (l.p.kind !== "video") continue;
       const c = l.p.clip as VideoClip;
       if (this.doc.assets[c.asset]?.type === "image") { await this.loadImage(l.p.id, c.asset); continue; }
@@ -304,9 +333,9 @@ void main(){ vec4 c = texture2D(tMap, vUv); float a = c.a * uOpacity; gl_FragCol
   }
 
   /** Texture 2D (texte, caption) dessinée à la résolution du canvas, moteur « canvas ». */
-  private textTexture(l: Layer, doc: Composition, layout: Layout): THREE.Texture | null {
-    const c: any = l.p.clip; const isCap = l.p.kind === "caption";
-    const def = getEffect(c.style, this.disabled); if (!def?.draw) return null;
+  private textTexture(l: Layer, doc: Composition, layout: Layout, src: FrameSource): THREE.Texture | null {
+    const c: any = l.p.clip, isCap = l.p.kind === "caption", isShape = l.p.kind === "shape";
+    const def = getEffect(isShape ? (c.shape?.preset ?? "svg_draw_v1") : c.style, this.disabled); if (!def?.draw) return null;
     let cv = this.canvases.get(l.p.id);
     if (!cv) { const el = document.createElement("canvas"); el.width = this.w; el.height = this.h; cv = { cv: el, tex: new THREE.CanvasTexture(el) }; this.canvases.set(l.p.id, cv); }
     const g = cv.cv.getContext("2d")!; g.clearRect(0, 0, this.w, this.h);
@@ -320,8 +349,8 @@ void main(){ vec4 c = texture2D(tMap, vUv); float a = c.a * uOpacity; gl_FragCol
       const k = (c as TextClip).counter!; const p = Math.min(1, l.local / Math.max(1, k.dur));
       text = String(Math.round(k.from + (k.to - k.from) * p)) + (k.suffix ?? "");
     }
-    const r = (c as TextClip).reveal;
-    def.draw({ g, w: this.w, h: this.h, t: l.local, dur: l.p.dur, text, words, emphasis: c.emphasis, params: resolveParams(def, c.params, l.local), reveal: r ? { by: r.by, stagger: r.stagger ?? 40 } : undefined });
+    const r = (c as TextClip).reveal, svg = isShape && c.shape?.asset ? src.svg?.(c.shape.asset) ?? undefined : undefined;
+    def.draw({ g, w: this.w, h: this.h, t: l.local, dur: l.p.dur, text, words, svg, emphasis: c.emphasis, params: resolveParams(def, isShape ? c.shape?.params : c.params, l.local), reveal: r ? { by: r.by, stagger: r.stagger ?? 40 } : undefined });
     cv.tex.needsUpdate = true; return cv.tex;
   }
 
@@ -332,7 +361,7 @@ void main(){ vec4 c = texture2D(tMap, vUv); float a = c.a * uOpacity; gl_FragCol
     const used: THREE.WebGLRenderTarget[] = [];
     if (l.p.kind === "video") {
       const s = src.texture(l.p.id); if (!s) return; tex = s.tex; tw = s.w; th = s.h; fitMode = c.fit ?? DEFAULTS.fit;
-    } else if (l.p.kind === "text" || l.p.kind === "caption") { tex = this.textTexture(l, doc, layout); }
+    } else if (l.p.kind === "text" || l.p.kind === "caption" || l.p.kind === "shape") { tex = this.textTexture(l, doc, layout, src); }
     else if (l.p.kind === "overlay") {
       const def = getEffect(c.effect, this.disabled); if (!def?.shader) return;
       const mat = this.fxMat(def, "overlay"); const m = this.setBlend(mat, c.blend);

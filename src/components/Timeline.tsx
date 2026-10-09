@@ -75,7 +75,7 @@ export default function Timeline() {
     const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); act.endGesture(); };
     window.addEventListener("pointermove", move); window.addEventListener("pointerup", up);
   };
-  const fits = (assetId: string | null, kind: TrackKind) => { const a = assetId ? doc.assets[assetId] : undefined; return !!a && ((kind === "video" && (a.type === "video" || a.type === "image")) || (kind === "audio" && a.type === "audio")); };
+  const fits = (assetId: string | null, kind: TrackKind) => { const a = assetId ? doc.assets[assetId] : undefined; return !!a && ((kind === "video" && (a.type === "video" || a.type === "image")) || (kind === "audio" && a.type === "audio") || (kind === "shape" && a.type === "svg")); };
   const onDragOverTrack = (e: React.DragEvent, tr: Track) => {
     const id = useEditor.getState().dragAsset; if (!id) return;
     const ok = fits(id, tr.kind) && !tr.locked;
@@ -147,7 +147,7 @@ export default function Timeline() {
         <button className="btn !px-2 !py-0.5" onClick={act.splitAtPlayhead} title="S">Couper</button>
         <button className="btn !px-2 !py-0.5" onClick={act.deleteSelected} disabled={!selection} title="Suppr">Supprimer</button>
         <select className="field !w-auto !py-0.5 !text-xs" value="" onChange={(e) => { if (e.target.value) addTrackWithDefault(e.target.value as TrackKind); }} aria-label="Ajouter une piste">
-          <option value="">+ Piste (avec un élément)</option>{(Object.keys(KIND) as TrackKind[]).filter((k) => k !== "shape").map((k) => <option key={k} value={k}>{KIND[k].label}</option>)}
+          <option value="">+ Piste (avec un élément)</option>{(Object.keys(KIND) as TrackKind[]).map((k) => <option key={k} value={k}>{KIND[k].label}</option>)}
         </select>
         {notice && <span role="status" className="ml-2 truncate text-warn">{notice}</span>}
         <input ref={fileRef} type="file" accept="audio/*" hidden onChange={(e) => { void onAudioFile(e.target.files?.[0]); e.target.value = ""; }} />

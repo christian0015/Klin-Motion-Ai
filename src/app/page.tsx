@@ -30,14 +30,14 @@ export default async function Landing() {
         <nav className="flex items-center gap-4 text-sm text-muted"><a href="#tarifs" className="hover:text-ink">Tarifs</a><Link href="/legal" className="hover:text-ink">Confidentialité</Link>{user && <Link href="/dashboard" className="btn !py-1.5">Mes projets</Link>}</nav>
       </header>
 
-      <section className="mx-auto grid max-w-6xl items-center gap-12 px-5 pb-24 pt-10 lg:grid-cols-[1.25fr_1fr] lg:pt-2">
+      <section className="mx-auto grid max-w-6xl items-center gap-12 px-5 pb-24 pt-10 lg:grid-cols-[1.25fr_1fr] lg:pt-20">
         <div>
-          <h1 className="chroma font-display text-[clamp(3.6rem,11vw,6.2rem)] leading-[0.9]">Déposez vos rushs, récupérez un film.</h1>
+          <h1 className="chroma font-display text-[clamp(3.6rem,11vw,8.2rem)] leading-[0.9]">Déposez vos rushs, récupérez un film.</h1>
           <p className="mt-8 max-w-xl text-lg leading-relaxed text-muted">Vous parlez à la caméra, vous décrivez ce que vous voulez : l'IA coupe, sous-titre et habille le montage avec un look cinéma. Vous retouchez ensuite chaque détail, directement dans l'éditeur.</p>
           <div className="mt-9 flex flex-wrap items-center gap-4"><Cta /><span className="text-sm text-muted">{free > 0 ? `${free} crédits offerts pour essayer, sans carte bancaire.` : "Connexion en un clic avec Google."}</span></div>
         </div>
         {/* démo : placeholder à remplacer par une vraie capture / vidéo */}
-        <div aria-hidden className="mx-auto w-full max-w-[19rem]">
+        <div aria-hidden className="mx-auto w-full max-w-[22rem]">
           <div className="relative aspect-[9/16] overflow-hidden rounded-[1.6rem] border border-line bg-[linear-gradient(160deg,#2a1d3a,#0f1a2b_55%,#3a1d2c)] shadow-[0_30px_80px_-20px_rgba(255,79,123,.35)]">
             <div className="absolute inset-0 opacity-70" style={{ background: "radial-gradient(circle at 50% 35%, rgba(255,216,160,.55), transparent 45%)" }} />
             <div className="absolute inset-x-5 bottom-[26%] text-center text-[1.7rem] font-extrabold leading-tight tracking-tight [text-shadow:0_2px_0_rgba(0,0,0,.7)]">Voici <span className="text-[#ffd84d]">pourquoi</span> ça marche</div>

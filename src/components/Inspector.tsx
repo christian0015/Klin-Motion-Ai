@@ -150,6 +150,13 @@ export default function Inspector() {
                 <p className="mt-2 text-[11px] text-muted">Réglages fixes sur toute la durée du clip. Les effets s'entendent en lecture et à l'export.</p>
               </Section>
             )}
+            {track!.kind === "shape" && (
+              <Section title="Forme">
+                {clip.shape?.asset && <p className="mb-2 text-xs text-muted">Dessin SVG : {(doc.assets[clip.shape.asset] as { name?: string } | undefined)?.name ?? clip.shape.asset}</p>}
+                <ReplaceSelect kind="shape_preset" value={clip.shape?.preset ?? "svg_draw_v1"} disabled={disabled} label="Remplacer le gabarit" onPick={(id) => mut((c) => { c.shape = { ...(c.shape?.asset ? { asset: c.shape.asset } : {}), preset: id }; }, "Remplacer la forme")} />
+                {registry.get(clip.shape?.preset ?? "svg_draw_v1") && <div className="mt-2"><ParamFields def={registry.get(clip.shape?.preset ?? "svg_draw_v1")!} values={clip.shape?.params} local={local} onSet={(k, v) => mut((c) => { c.shape.params = { ...(c.shape.params ?? {}), [k]: v }; })} /></div>}
+              </Section>
+            )}
             {track!.kind === "text" && (
               <Section title="Texte">
                 <input className="field mb-2" value={clip.text ?? ""} maxLength={500} placeholder="Votre texte" onChange={(e) => mut((c) => { c.text = e.target.value; })} onBlur={act.endGesture} />
@@ -200,7 +207,7 @@ export default function Inspector() {
               </Section>
             )}
 
-            {(track!.kind === "video" || track!.kind === "adjustment" || track!.kind === "text" || track!.kind === "caption") && (
+            {(track!.kind === "video" || track!.kind === "adjustment" || track!.kind === "text" || track!.kind === "caption" || track!.kind === "shape") && (
               <Section title="Effets d'image">
                 {(clip.fx ?? []).map((f: any, i: number) => (
                   <div key={i} className="mb-3 rounded-lg border border-line p-2">
@@ -211,7 +218,7 @@ export default function Inspector() {
                 <EffectPicker kind="fx" disabled={disabled} placeholder="+ Ajouter un effet" onPick={(id) => mut((c) => { c.fx = [...(c.fx ?? []), { id }]; }, "Ajouter un effet")} />
               </Section>
             )}
-            {(track!.kind === "video" || track!.kind === "text" || track!.kind === "caption") && (
+            {(track!.kind === "video" || track!.kind === "text" || track!.kind === "caption" || track!.kind === "shape") && (
               <Section title="Déformation (mesh)">
                 {clip.mesh ? (
                   <>

@@ -23,9 +23,20 @@ import autotune from "./autotune_v1";
 import kenBurns from "./ken_burns_v1";
 import crossfade from "./crossfade_v1";
 import slide from "./slide_v1";
+import lowerThird from "./lower_third_v1";
+import underline from "./underline_swoosh_v1";
+import arrow from "./arrow_pointer_v1";
+import circleCallout from "./circle_callout_v1";
+import progressBar from "./progress_bar_v1";
+import statCounter from "./stat_counter_v1";
+import badgePop from "./badge_pop_v1";
+import burstLines from "./burst_lines_v1";
+import svgDraw from "./svg_draw_v1";
 
 export const EFFECTS: EffectDef[] = [
   vignette, bw, frameNeon, clothWave, tealOrange, popIn, minimalClean, cleanTitle, crossfade, slide, glitchCut, kenBurns,
+  // shape_preset (formes et gabarits, moteur canvas) : l'IA les choisit et les remplit
+  lowerThird, underline, arrow, circleCallout, progressBar, statCounter, badgePop, burstLines, svgDraw,
   // audio_fx (Web Audio) : appliqués aux clips vidéo et audio via `afx`
   echo, delay, reverbRoom, radioVoice, autotune,
   // ← phase 2 : une ligne par nouvel effet
