@@ -398,7 +398,8 @@ add("POST", "analyze", "user", async ({ user, body }) => {
   const b = parse(z.strictObject({ projectId: z.string() }), body);
   const { plan, est, u } = await analysisBase(user.id, b.projectId);
   if (u.suspended) throw new HttpError(403, "Compte suspendu.");
-  if (await Job.countDocuments({ userId: user.id, status: { $in: ["queued", "running"] } })) throw new HttpError(429, "Une analyse est déjà en cours.", {}, { "Retry-After": "30" });
+  const existingJob = await Job.findOne({ userId: user.id, status: { $in: ["queued", "running"] }, kind: "analyze" }).select("_id").lean();
+  if (existingJob) throw new HttpError(429, "Une analyse est déjà en cours.", { jobId: String(existingJob._id) }, { "Retry-After": "30" });
   if ((await Job.countDocuments({ status: { $in: ["queued", "running"] } })) >= LIMITS.maxActiveJobs) throw new HttpError(503, "Le service est très sollicité, réessayez dans une minute.", {}, { "Retry-After": "60" });
   const today = await Job.countDocuments({ userId: user.id, kind: "analyze", createdAt: { $gte: new Date(new Date().setHours(0, 0, 0, 0)) } });
   if (today >= plan.dailyAnalyses) throw new HttpError(429, `Limite quotidienne atteinte (${plan.dailyAnalyses} analyses).`);

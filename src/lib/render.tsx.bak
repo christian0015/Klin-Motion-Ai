@@ -303,7 +303,7 @@ export class Compositor {
   private runFx(tex: THREE.Texture, list: FxRef[] | undefined, local: Ms, t: Ms, seed: number): { tex: THREE.Texture; used: THREE.WebGLRenderTarget[] } {
     const used: THREE.WebGLRenderTarget[] = [];
     for (const f of list ?? []) {
-      const def = getEffect(f.id, this.disabled); if (!def?.shader || (def.kind !== "fx" && def.kind !== "lut")) continue;
+      const def = getEffect(f.id, this.disabled); if (!def?.shader || def.kind !== "fx") continue;
       const out = this.acquire(); used.push(out); this.clear(out);
       this.fullscreen(this.fxMat(def, "fx"), { tMap: { value: tex }, uTime: { value: t / 1000 }, uRes: { value: new THREE.Vector2(this.w, this.h) }, uSeed: { value: seed }, uAmount: { value: 1 }, ...paramUniforms(def, resolveParams(def, f.params, local)) }, out, true);
       tex = out.texture;

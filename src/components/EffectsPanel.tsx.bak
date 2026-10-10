@@ -13,8 +13,8 @@ import { useEditor } from "@/lib/store";
 
 const GROUPS: { kind: EffectKind; label: string; how: string }[] = [
   { kind: "fx", label: "Effets d'image", how: "Sur le clip sélectionné, sinon un calque d'effets au playhead" },
-  { kind: "lut", label: "Looks (étalonnage)", how: "Sur tout le projet — ou sur la durée d'un calque d'effets (piste Adjustment) si un calque est sélectionné" },
-  { kind: "transition", label: "Transitions", how: "Entre le clip sélectionné et le suivant — nécessite un clip sur la piste vidéo principale (magnétique) suivi d'un autre clip. Le résultat est visible dans doc.transitions[] (onglet JSON à la racine, pas dans le clip)" },
+  { kind: "lut", label: "Looks (étalonnage)", how: "Sur tout le projet" },
+  { kind: "transition", label: "Transitions", how: "Entre le clip sélectionné et le suivant (piste principale)" },
   { kind: "overlay", label: "Overlays", how: "Nouvelle couche au playhead" },
   { kind: "mesh", label: "Déformations", how: "Sur le clip sélectionné" },
   { kind: "motion_preset", label: "Animations", how: "Sur le clip sélectionné" },

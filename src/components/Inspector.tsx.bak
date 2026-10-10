@@ -85,14 +85,6 @@ export default function Inspector() {
       <div className="min-h-0 flex-1 overflow-y-auto">
         {tab === "json" ? <JsonTab doc={doc} /> : !p ? <ProjectProps disabled={disabled} /> : (
           <>
-            {/* Look global toujours visible, même avec un clip sélectionné */}
-            <Section title="Look global (étalonnage)">
-              <select className="field !py-1 text-xs" value={doc.grade?.lut ?? ""} onChange={(e) => act.apply("Look global", (d) => { d.grade = e.target.value ? { lut: e.target.value, amount: d.grade?.amount ?? 0.7 } : undefined; })}>
-                <option value="">Aucun</option>{activeEffects(disabled, "lut").map((e) => <option key={e.id} value={e.id}>{e.id}</option>)}
-              </select>
-              {doc.grade && <div className="mt-2"><NumField label="intensité" value={doc.grade.amount} def={0.7} min={0} max={1} local={0} onChange={(n) => act.apply("Intensité du look", (d) => { if (d.grade) d.grade.amount = n; }, true)} /></div>}
-              <p className="mt-1 text-[11px] text-muted">Pour un look sur une zone précise, ajoutez un calque d'effets (piste Adjustment) et appliquez-y le look depuis l'onglet Effets.</p>
-            </Section>
             <Section title={`${track!.kind} — ${p.id}`}>
               <div className="flex flex-wrap gap-2 text-xs">
                 {clip.anchor ? <button className="btn !py-1" onClick={() => mut((c) => { c.at = p.at; c.dur = p.dur; delete c.anchor; }, "Détacher")}>Détacher des mots (figer le temps)</button>
@@ -116,18 +108,9 @@ export default function Inspector() {
                 {note && <p className="mt-1 text-[11px] text-warn">{note}</p>}
               </Section>
             )}
-            {track!.kind === "video" && (() => {
-              if (!p.magnetic) return (
-                <Section title="Transition vers le clip suivant">
-                  <p className="text-[11px] text-muted">Les transitions ne s'appliquent qu'entre deux clips consécutifs de la <strong>piste vidéo principale</strong> (piste magnétique). Ce clip est sur une piste secondaire.</p>
-                </Section>
-              );
+            {p.magnetic && (() => {
               const clips = doc.tracks[p.trackIdx].clips, next = clips[clips.findIndex((c) => c.id === p.id) + 1];
-              if (!next) return (
-                <Section title="Transition vers le clip suivant">
-                  <p className="text-[11px] text-muted">Ce clip est le dernier de la piste : une transition relie un clip au suivant. Ajoutez un clip après celui-ci pour activer cette option.</p>
-                </Section>
-              );
+              if (!next) return null;
               const tr = doc.transitions.find((x) => x.between[0] === p.id && x.between[1] === next.id), list = activeEffects(disabled, "transition");
               return (
                 <Section title="Transition vers le clip suivant">
@@ -137,7 +120,6 @@ export default function Inspector() {
                     {list.map((e) => <option key={e.id} value={e.id} title={e.describe}>{e.id}</option>)}
                   </select>
                   {tr && <label className="mt-2 flex items-center gap-2 text-xs"><span className="w-20 text-muted">durée (ms)</span><input type="number" min={50} max={2000} step={50} className="field !w-24 !py-0.5 font-mono" value={tr.dur} onChange={(e) => act.setTransition(p.id, tr.effect, Math.min(2000, Math.max(50, +e.target.value)))} /></label>}
-                  <p className="mt-1 text-[11px] text-muted">La transition est stockée dans <code>doc.transitions[]</code>, pas dans le clip — vérifiez l'onglet JSON à la racine du document.</p>
                 </Section>
               );
             })()}
@@ -198,7 +180,7 @@ export default function Inspector() {
               </Section>
             )}
 
-            {track!.kind !== "audio" && track!.kind !== "adjustment" && (
+            {track!.kind !== "audio" && track!.kind !== "adjustment" && track!.kind !== "overlay" && (
               <>
               <Section title="Position et forme">
                 <div className="space-y-1.5">
@@ -225,7 +207,7 @@ export default function Inspector() {
               </Section>
             )}
 
-            {(track!.kind === "video" || track!.kind === "adjustment" || track!.kind === "text" || track!.kind === "caption" || track!.kind === "shape" || track!.kind === "overlay") && (
+            {(track!.kind === "video" || track!.kind === "adjustment" || track!.kind === "text" || track!.kind === "caption" || track!.kind === "shape") && (
               <Section title="Effets d'image">
                 {(clip.fx ?? []).map((f: any, i: number) => (
                   <div key={i} className="mb-3 rounded-lg border border-line p-2">
@@ -236,7 +218,7 @@ export default function Inspector() {
                 <EffectPicker kind="fx" disabled={disabled} placeholder="+ Ajouter un effet" onPick={(id) => mut((c) => { c.fx = [...(c.fx ?? []), { id }]; }, "Ajouter un effet")} />
               </Section>
             )}
-            {(track!.kind === "video" || track!.kind === "text" || track!.kind === "caption" || track!.kind === "shape" || track!.kind === "overlay") && (
+            {(track!.kind === "video" || track!.kind === "text" || track!.kind === "caption" || track!.kind === "shape") && (
               <Section title="Déformation (mesh)">
                 {clip.mesh ? (
                   <>

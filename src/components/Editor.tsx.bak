@@ -35,7 +35,6 @@ export default function Editor({ initial }: { initial: Initial }) {
   const [toast, setToast] = useState<{ kind: "ok" | "err"; msg: string } | null>(null);
   const [confirm, setConfirm] = useState<{ credits: number; minutes: number; balance: number; tokens: number } | null>(null);
   const abort = useRef<AbortController | null>(null);
-  const cancelAnalyze = useRef(false);
   const say = useCallback((kind: "ok" | "err", msg: string) => { setToast({ kind, msg }); setTimeout(() => setToast(null), 7000); }, []);
   const act = useEditor.getState();
   const onMissing = useCallback((id: string) => useEditor.getState().setSync(id, { state: "missing" }), []);
@@ -177,22 +176,11 @@ export default function Editor({ initial }: { initial: Initial }) {
   };
   const launch = async () => {
     setConfirm(null); const st = useEditor.getState(); const before = st.doc;
-    cancelAnalyze.current = false;
     try {
       st.setStatus("analyzing", 0.02, "Analyse lancée…");
-      let jobId: string | undefined;
-      try {
-        ({ jobId } = await api("analyze", "POST", { projectId: st.projectId }));
-      } catch (e) {
-        if (e instanceof ApiError && e.status === 429 && (e.data as any)?.jobId) {
-          jobId = (e.data as any).jobId as string;
-          st.setStatus("analyzing", 0.05, "Reprise de l'analyse en cours…");
-        } else { throw e; }
-      }
-      if (!jobId) throw new Error("Impossible de lancer l'analyse.");
+      const { jobId } = await api("analyze", "POST", { projectId: st.projectId });
       for (;;) {
         await new Promise((r) => setTimeout(r, 2000));
-        if (cancelAnalyze.current) { st.setStatus("ready"); say("err", "Analyse annulée."); api<Me>("me").then(setMe).catch(() => {}); return; }
         const j = await api(`jobs/${jobId}`);
         st.setStatus("analyzing", j.progress, j.message ?? "Analyse en cours…");
         if (j.status === "failed") throw new Error(j.error ?? "L'analyse a échoué : crédits remboursés.");
@@ -258,7 +246,6 @@ export default function Editor({ initial }: { initial: Initial }) {
           {busy && <i className="spinner" />}
           <span className="flex-1">{s.message || { importing: "Import…", proxying: "Préparation…", analyzing: "Analyse…", exporting: "Export…" }[s.status as string]}</span>
           {busy && <div className="h-1.5 w-40 overflow-hidden rounded bg-line"><div className="h-full bg-accent transition-[width]" style={{ width: `${Math.round(s.progress * 100)}%` }} /></div>}
-          {s.status === "analyzing" && <button className="btn !py-0.5" onClick={() => { cancelAnalyze.current = true; }}>Annuler</button>}
           {s.status === "exporting" && <button className="btn !py-0.5" onClick={() => abort.current?.abort()}>Annuler</button>}
           {s.status === "error" && <button className="btn !py-0.5" onClick={() => act.setStatus("ready")}>Fermer</button>}
         </div>

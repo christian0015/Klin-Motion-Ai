@@ -385,9 +385,7 @@ export const useEditor = create<EditorState>()((set, get) => ({
       case "fx":
         if (p && (visual || p.kind === "adjustment")) return onClip("Ajouter un effet", (c) => { c.fx = [...(c.fx ?? []), { id: effectId }].slice(0, 12); });
         return push(ensure("adjustment"), { id: nanoid(6), at: t, dur: 3000, fx: [{ id: effectId }] }, "Calque d'effets");   // rien de sélectionné : calque d'effets au playhead
-      case "lut":
-        if (p?.kind === "adjustment") return onClip("Look zonal", (c) => { c.fx = [...(c.fx ?? []), { id: effectId }].slice(0, 12); });
-        get().apply("Look global", (d) => { d.grade = { lut: effectId, amount: d.grade?.amount ?? 0.7 }; }); return { ok: true };
+      case "lut": get().apply("Look global", (d) => { d.grade = { lut: effectId, amount: d.grade?.amount ?? 0.7 }; }); return { ok: true };
       case "transition": return p ? get().setTransition(p.id, effectId) : needClip("un clip de la piste vidéo principale (suivi d'un autre clip)");
       case "overlay": return push(ensure("overlay"), { id: nanoid(6), effect: effectId, at: t, dur: 2000, blend: "add" }, "Overlay");
       case "mesh": return visual ? onClip("Déformation", (c) => { c.mesh = { id: effectId }; }) : needClip("un clip vidéo, texte ou sous-titres");
